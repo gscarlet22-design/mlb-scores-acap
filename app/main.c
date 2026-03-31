@@ -20,7 +20,7 @@
 #include <errno.h>
 
 #include <curl/curl.h>
-#include <cjson/cJSON.h>
+#include "cJSON.h"
 #include <axsdk/axparameter.h>
 
 /* ── Constants ──────────────────────────────────────────────────── */
@@ -903,3 +903,4 @@ int main(void) {
     pthread_mutex_destroy(&g_app.lock);
     return 0;
 }
+
