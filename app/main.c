@@ -346,7 +346,6 @@ static int parse_live_feed(const char *body, LiveData *out) {
                 cJSON *tid = cJSON_GetObjectItem(away, "id");
                 if (cJSON_IsNumber(tid)) away_id = (int)tid->valuedouble;
             }
-            if (home) {
             /* opponent name */
             cJSON *opp = (away_id == g_app.team_id) ? home : away;
             if (opp) {
@@ -900,5 +899,3 @@ int main(void) {
     pthread_mutex_destroy(&g_app.lock);
     return 0;
 }
-
-
