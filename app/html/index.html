@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLB Live Scores</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">⚾</div>
+            <h1>MLB Live Scores</h1>
+            <p class="subtitle">MRDN Labs</p>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" data-tab="status">Status</button>
+            <button class="tab" data-tab="config">Config</button>
+        </div>
+
+        <!-- Status Tab -->
+        <div id="status" class="panel active">
+
+            <!-- Team banner -->
+            <div class="team-banner" id="team-banner">
+                <span id="banner-team-name">Loading...</span>
+            </div>
+
+            <!-- Scoreboard -->
+            <div class="scoreboard" id="scoreboard">
+                <div class="team-block">
+                    <div class="team-label" id="my-team-label">—</div>
+                    <div class="team-score" id="my-score">—</div>
+                </div>
+                <div class="game-meta">
+                    <div class="game-state" id="game-state">No Game</div>
+                    <div class="inning-info" id="inning-info"></div>
+                    <div class="outs-info" id="outs-info"></div>
+                </div>
+                <div class="team-block">
+                    <div class="team-label" id="opp-name">Opponent</div>
+                    <div class="team-score" id="opp-score">—</div>
+                </div>
+            </div>
+
+            <!-- Last play -->
+            <div class="last-play-box">
+                <div class="last-play-label">Last Play</div>
+                <div class="last-play-text" id="last-play">--</div>
+            </div>
+
+            <!-- Status grid -->
+            <div class="status-grid">
+                <div class="status-item">
+                    <label>Status</label>
+                    <span id="st-enabled" class="badge">--</span>
+                </div>
+                <div class="status-item">
+                    <label>Last Poll</label>
+                    <span id="st-last-poll">--</span>
+                </div>
+            </div>
+
+            <button id="btn-refresh" class="btn btn-secondary btn-full" style="margin-top:12px;">
+                Refresh Now
+            </button>
+        </div>
+
+        <!-- Config Tab -->
+        <div id="config" class="panel">
+
+            <h3 class="section-title">Team</h3>
+            <div class="form-group">
+                <label for="team-select">Follow Team</label>
+                <select id="team-select">
+                    <option value="">Loading teams...</option>
+                </select>
+            </div>
+
+            <hr class="divider">
+
+            <h3 class="section-title">Device Credentials</h3>
+            <p class="hint">Required for display and audio control.</p>
+            <div class="form-group">
+                <label for="device-user">Username</label>
+                <input type="text" id="device-user" value="root" autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label for="device-pass">Password</label>
+                <input type="password" id="device-pass" placeholder="Enter device password" autocomplete="off">
+            </div>
+
+            <hr class="divider">
+
+            <h3 class="section-title">Polling</h3>
+            <div class="form-group">
+                <label for="poll-interval">Live Game Poll Interval</label>
+                <select id="poll-interval">
+                    <option value="15">15 seconds</option>
+                    <option value="30" selected>30 seconds</option>
+                    <option value="60">60 seconds</option>
+                    <option value="120">2 minutes</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="enabled">Enabled</label>
+                <label class="toggle">
+                    <input type="checkbox" id="enabled" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <hr class="divider">
+
+            <h3 class="section-title">Display</h3>
+            <div class="form-group">
+                <label for="disp-enabled">Show on Display</label>
+                <label class="toggle">
+                    <input type="checkbox" id="disp-enabled" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="form-group">
+                <label for="text-size">Text Size</label>
+                <select id="text-size">
+                    <option value="small">Small</option>
+                    <option value="medium">Medium</option>
+                    <option value="large" selected>Large</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <div class="form-group half">
+                    <label for="text-color">Text Color</label>
+                    <input type="color" id="text-color" value="#FFFFFF">
+                </div>
+                <div class="form-group half">
+                    <label for="bg-color">Background</label>
+                    <input type="color" id="bg-color" value="#041E42">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="scroll-speed">Scroll Speed</label>
+                <input type="range" id="scroll-speed" min="1" max="5" value="3" step="1">
+                <span class="range-val" id="scroll-speed-val">3</span>
+            </div>
+            <div class="form-group">
+                <label for="duration">Duration (seconds)</label>
+                <input type="number" id="duration" value="20" min="3" max="120">
+            </div>
+            <button id="btn-test-display" class="btn btn-secondary btn-full">Test Display</button>
+
+            <hr class="divider">
+
+            <h3 class="section-title">Audio</h3>
+            <div class="form-group">
+                <label for="clip-notify">Notification Sound</label>
+                <select id="clip-notify"><option value="">Loading...</option></select>
+            </div>
+            <div class="form-group">
+                <label for="clip-score">Scoring Sound</label>
+                <select id="clip-score"><option value="">Loading...</option></select>
+            </div>
+            <button id="btn-test-audio" class="btn btn-secondary btn-full">Test Sound</button>
+
+            <hr class="divider">
+
+            <button id="btn-save" class="btn btn-primary">Save Settings</button>
+            <div id="save-msg" class="save-msg"></div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
