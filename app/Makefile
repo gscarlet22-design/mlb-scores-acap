@@ -1,9 +1,9 @@
-PROG = royals_scores
-SRCS = main.c
+PROG = mlb_scores
+SRCS = main.c cJSON.c
 OBJS = $(SRCS:.c=.o)
 
-LDLIBS  = -lcurl -lcjson -laxparameter -lpthread
-CFLAGS += -Wall -Wextra -O2 -std=c11
+LDLIBS  = -lcurl -laxparameter -lpthread
+CFLAGS += -Wall -Wextra -O2 -std=c11 -I.
 
 .PHONY: all clean
 
