@@ -125,6 +125,7 @@
             document.getElementById('bg-color').value       = d.display_bg_color || '#041E42';
             document.getElementById('scroll-speed').value   = d.display_scroll_speed || '3';
             document.getElementById('scroll-speed-val').textContent = d.display_scroll_speed || '3';
+            document.getElementById('persist-final').checked = (d.display_persist_final || 'true').toLowerCase() === 'true';
             document.getElementById('duration').value       = Math.round((parseInt(d.display_duration_ms) || 20000) / 1000);
             loadClips(d.notification_clip_id, d.score_clip_id);
         }).catch(function () { loadTeams(); loadClips(); });
@@ -155,6 +156,7 @@
             display_text_color:   document.getElementById('text-color').value,
             display_bg_color:     document.getElementById('bg-color').value,
             display_scroll_speed: document.getElementById('scroll-speed').value,
+            display_persist_final: document.getElementById('persist-final').checked ? 'true' : 'false',
             display_duration_ms:  String(parseInt(document.getElementById('duration').value) * 1000)
         };
         var pass = document.getElementById('device-pass').value;
