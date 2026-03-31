@@ -18,10 +18,20 @@ ARG SDK=acap-native-sdk
 
 FROM ${REPO}/${SDK}:${VERSION}-${ARCH}-ubuntu${UBUNTU_VERSION}
 
+# Download cJSON source (not bundled in Axis SDK sysroot)
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.h -o /tmp/cJSON.h && \
+    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c -o /tmp/cJSON.c
+
 # Copy application source into the SDK build directory
 COPY ./app /opt/app/
+
+# Place cJSON alongside the app source
+RUN cp /tmp/cJSON.h /opt/app/cJSON.h && \
+    cp /tmp/cJSON.c /opt/app/cJSON.c
 
 WORKDIR /opt/app
 
 # Source the SDK environment and build
 RUN . /opt/axis/acapsdk/environment-setup* && acap-build ./
+
