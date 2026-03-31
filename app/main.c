@@ -116,6 +116,7 @@ typedef struct {
     char   display_bg_color[16];
     char   display_text_size[16];
     int    display_scroll_speed;
+    int    display_persist_final;
     int    enabled;
 
     /* team selection */
@@ -155,6 +156,7 @@ static AppState g_app = {
     .display_bg_color    = "#041E42",
     .display_text_size   = "large",
     .display_scroll_speed = 3,
+    .display_persist_final = 1,
     .enabled             = 1,
     .team_id             = 118,   /* Kansas City Royals default */
     .team_name           = "Royals",
@@ -208,25 +210,19 @@ static void display_show(const char *message) {
     if (strncmp(message, g_app.last_display_msg, MAX_MSG - 1) == 0) return;
     strncpy(g_app.last_display_msg, message, MAX_MSG - 1);
 
-    /* Build JSON body */
+    /* Build JSON body — C1710/C1720 speaker-display-notification v1 API
+       expects: { "data": { "message", "duration": {"type","value"}, ... } } */
     char body[1024];
-    /* text-size map: small=18, medium=24, large=32 */
-    int font_size = 24;
-    if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
-    if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
-
     snprintf(body, sizeof(body),
-        "{\"text\":\"%s\","
-        "\"duration\":%d,"
+        "{\"data\":{\"message\":\"%s\","
+        "\"duration\":{\"type\":\"time\",\"value\":%d},"
         "\"textColor\":\"%s\","
         "\"backgroundColor\":\"%s\","
-        "\"fontSize\":%d,"
-        "\"scrollSpeed\":%d}",
+        "\"scrollSpeed\":%d}}",
         message,
         g_app.display_duration_ms,
         g_app.display_text_color,
         g_app.display_bg_color,
-        font_size,
         g_app.display_scroll_speed);
 
     curl_easy_reset(g_app.display_curl);
@@ -515,8 +511,10 @@ static void poll_once(void) {
 
     pthread_mutex_unlock(&g_app.lock);
 
-    /* Always update display when live or score changed */
-    if (g_app.is_live || score_changed)
+    int is_final = (strcmp(live.state, "Final") == 0);
+
+    /* Always update display when live, score changed, or game just ended */
+    if (g_app.is_live || score_changed || is_final)
         display_show(msg);
 
     /* Play clip on scoring plays */
@@ -525,9 +523,28 @@ static void poll_once(void) {
     else if (score_changed)
         play_clip(g_app.notification_clip_id);
 
-    /* Reset game_pk after final so we re-check next day */
-    if (strcmp(live.state, "Final") == 0) {
-        sleep(60);  /* show final for a bit then clear */
+    /* After final: either persist the score on display or just wait and reset */
+    if (is_final) {
+        if (g_app.display_persist_final && g_app.display_enabled) {
+            /* Keep resending so the final score stays on screen.
+               Loop until the local date rolls over (i.e. past midnight). */
+            char game_date[16];
+            today_str(game_date, sizeof(game_date));
+
+            int resend_sec = (g_app.display_duration_ms / 1000) - 2;
+            if (resend_sec < 5) resend_sec = 5;
+
+            while (g_app.running && g_app.display_persist_final) {
+                sleep(resend_sec);
+                char now_date[16];
+                today_str(now_date, sizeof(now_date));
+                if (strcmp(now_date, game_date) != 0) break;  /* past midnight */
+                g_app.last_display_msg[0] = '\0';
+                display_show(msg);
+            }
+        } else {
+            sleep(60);
+        }
         g_app.current_game_pk = 0;
     }
 }
@@ -628,6 +645,7 @@ static void handle_request(int fd) {
             "\"display_text_color\":\"%s\","
             "\"display_bg_color\":\"%s\","
             "\"display_scroll_speed\":\"%d\","
+            "\"display_persist_final\":\"%s\","
             "\"display_duration_ms\":\"%d\","
             "\"device_user\":\"%s\","
             "\"device_pass_set\":%s}",
@@ -641,6 +659,7 @@ static void handle_request(int fd) {
             g_app.display_text_color,
             g_app.display_bg_color,
             g_app.display_scroll_speed,
+            g_app.display_persist_final ? "true" : "false",
             g_app.display_duration_ms,
             g_app.device_user,
             strlen(g_app.device_pass) > 0 ? "true" : "false");
@@ -674,6 +693,7 @@ static void handle_request(int fd) {
             SET_STR("display_text_color",       display_text_color)
             SET_STR("display_bg_color",         display_bg_color)
             SET_INT_STR("display_scroll_speed", display_scroll_speed)
+            SET_BOOL_STR("display_persist_final", display_persist_final)
             SET_INT_STR("display_duration_ms",  display_duration_ms)
             SET_STR("device_user",              device_user)
             if ((v = cJSON_GetObjectItem(j, "device_pass")) && cJSON_IsString(v) && strlen(v->valuestring))
@@ -712,6 +732,7 @@ static void handle_request(int fd) {
             AXSET("DisplayBgColor",       g_app.display_bg_color);
             snprintf(tmp, sizeof(tmp), "%d", g_app.display_scroll_speed);
             AXSET("DisplayScrollSpeed",   tmp);
+            AXSET("DisplayPersistFinal",  g_app.display_persist_final ? "true" : "false");
             snprintf(tmp, sizeof(tmp), "%d", g_app.display_duration_ms);
             AXSET("DisplayDurationMs",    tmp);
             AXSET("DeviceUser",           g_app.device_user);
@@ -743,16 +764,26 @@ static void handle_request(int fd) {
 
     /* ── GET /clips ── */
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/clips") == 0) {
-        /* Proxy VAPIX mediaclip list */
+        /* Proxy VAPIX mediaclip list — set credentials after http_get's
+           curl_easy_reset so they aren't wiped.                          */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
             "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.MediaClip");
         CURL *c = curl_easy_init();
+        CurlBuf buf = {NULL, 0};
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+        curl_easy_setopt(c, CURLOPT_URL, url);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(c, CURLOPT_USERAGENT, APP_NAME "/1.0");
         curl_easy_setopt(c, CURLOPT_USERPWD, cred);
         curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-        char *raw = http_get(c, url);
+        CURLcode rc = curl_easy_perform(c);
+        char *raw = (rc == CURLE_OK) ? buf.data : NULL;
+        if (rc != CURLE_OK) free(buf.data);
         curl_easy_cleanup(c);
 
         /* Convert VAPIX param output to JSON clip list */
@@ -761,9 +792,10 @@ static void handle_request(int fd) {
         if (raw) {
             char *line = strtok(raw, "\n");
             while (line) {
-                /* Line format: root.MediaClip.C1.Name=SomeName */
-                int idx; char name[128];
-                if (sscanf(line, "root.MediaClip.C%d.Name=%127[^\r]", &idx, name) == 2) {
+                /* Line format varies by model: root.MediaClip.C1.Name=...
+                   or root.MediaClip.M36.Name=... — skip the letter prefix */
+                int idx; char name[128]; char prefix;
+                if (sscanf(line, "root.MediaClip.%c%d.Name=%127[^\r]", &prefix, &idx, name) == 3) {
                     cJSON *clip = cJSON_CreateObject();
                     cJSON_AddNumberToObject(clip, "id", idx);
                     cJSON_AddStringToObject(clip, "name", name);
@@ -841,6 +873,9 @@ static void load_params(void) {
 #define GETINT(name, field) \
     if (ax_parameter_get(p, name, &v, NULL) && v) { \
         g_app.field = atoi(v); g_free(v); v=NULL; }
+#define GETINT_NZ(name, field) \
+    if (ax_parameter_get(p, name, &v, NULL) && v) { \
+        int _tmp = atoi(v); if (_tmp) g_app.field = _tmp; g_free(v); v=NULL; }
 #define GETBOOL(name, field) \
     if (ax_parameter_get(p, name, &v, NULL) && v) { \
         g_app.field = (strcmp(v,"true")==0); g_free(v); v=NULL; }
@@ -848,13 +883,14 @@ static void load_params(void) {
     GETBOOL("Enabled",            enabled)
     GETINT("TeamId",              team_id)
     GETINT("PollIntervalSec",     poll_interval_sec)
-    GETINT("NotificationClipId",  notification_clip_id)
-    GETINT("ScoreClipId",         score_clip_id)
+    GETINT_NZ("NotificationClipId",  notification_clip_id)
+    GETINT_NZ("ScoreClipId",         score_clip_id)
     GETBOOL("DisplayEnabled",     display_enabled)
     GETSTR("DisplayTextSize",     display_text_size)
     GETSTR("DisplayTextColor",    display_text_color)
     GETSTR("DisplayBgColor",      display_bg_color)
     GETINT("DisplayScrollSpeed",  display_scroll_speed)
+    GETBOOL("DisplayPersistFinal", display_persist_final)
     GETINT("DisplayDurationMs",   display_duration_ms)
     GETSTR("DeviceUser",          device_user)
     GETSTR("DevicePass",          device_pass)

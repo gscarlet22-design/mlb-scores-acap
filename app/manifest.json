@@ -4,7 +4,7 @@
         "setup": {
             "appName": "mlb_scores",
             "friendlyName": "MLB Live Scores",
-            "vendor": "MRDN Labs",
+            "vendor": "gscarlet22 design",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
             "version": "1.0.0",
@@ -72,6 +72,11 @@
                 {
                     "name": "DisplayScrollSpeed",
                     "default": "3",
+                    "type": "String"
+                },
+                {
+                    "name": "DisplayPersistFinal",
+                    "default": "true",
                     "type": "String"
                 },
                 {
