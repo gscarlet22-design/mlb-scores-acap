@@ -570,8 +570,16 @@ static void handle_request(int fd) {
     if (n <= 0) return;
 
     /* Extract method and path */
-    char method[8], path[256];
-    sscanf(req, "%7s %255s", method, path);
+    char method[8], raw_path[256];
+    sscanf(req, "%7s %255s", method, raw_path);
+
+    /* Axis reverse-proxy may forward the full URI including the
+       /local/<appname>/api prefix.  Normalise so handler matching
+       always sees paths starting with "/api/".                      */
+    const char *prefix = "/local/mlb_scores";
+    const char *path = raw_path;
+    if (strncmp(raw_path, prefix, strlen(prefix)) == 0)
+        path = raw_path + strlen(prefix);
 
     /* Read body for POSTs */
     char body_buf[4096] = {0};
