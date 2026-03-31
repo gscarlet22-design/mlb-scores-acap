@@ -341,15 +341,12 @@ static int parse_live_feed(const char *body, LiveData *out) {
         if (teams) {
             cJSON *away = cJSON_GetObjectItem(teams, "away");
             cJSON *home = cJSON_GetObjectItem(teams, "home");
-            int away_id = 0, home_id = 0;
+            int away_id = 0;
             if (away) {
                 cJSON *tid = cJSON_GetObjectItem(away, "id");
                 if (cJSON_IsNumber(tid)) away_id = (int)tid->valuedouble;
             }
             if (home) {
-                cJSON *tid = cJSON_GetObjectItem(home, "id");
-                if (cJSON_IsNumber(tid)) home_id = (int)tid->valuedouble;
-            }
             /* opponent name */
             cJSON *opp = (away_id == g_app.team_id) ? home : away;
             if (opp) {
@@ -564,8 +561,8 @@ static void http_respond(int fd, int code, const char *ctype, const char *body) 
         "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n\r\n",
         code, reason, ctype, strlen(body));
-    write(fd, hdr, hlen);
-    write(fd, body, strlen(body));
+    (void)write(fd, hdr, hlen);
+    (void)write(fd, body, strlen(body));
 }
 
 static void handle_request(int fd) {
@@ -700,7 +697,7 @@ static void handle_request(int fd) {
             /* Persist to AXParameter */
             AXParameter *p = g_app.ax_params;
             char tmp[32];
-#define AXSET(name, val) ax_parameter_set(p, name, val, NULL)
+#define AXSET(name, val) ax_parameter_set(p, name, val, TRUE, NULL)
             AXSET("Enabled",              g_app.enabled ? "true" : "false");
             snprintf(tmp, sizeof(tmp), "%d", g_app.team_id);
             AXSET("TeamId",               tmp);
@@ -903,4 +900,5 @@ int main(void) {
     pthread_mutex_destroy(&g_app.lock);
     return 0;
 }
+
 
