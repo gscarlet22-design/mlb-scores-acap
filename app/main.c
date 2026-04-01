@@ -259,7 +259,7 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
         g_app.display_scroll_speed);
 
     CurlBuf resp_buf = {NULL, 0};
-    curl_easy_reset(g_app.display_curl);
+    CURL *dc = curl_easy_init();
 
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -267,19 +267,20 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
 
-    curl_easy_setopt(g_app.display_curl, CURLOPT_URL, DISPLAY_API);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_COPYPOSTFIELDS, body);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_WRITEDATA, &resp_buf);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
+    curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
+    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
+    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
+    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
 
-    CURLcode rc = curl_easy_perform(g_app.display_curl);
+    CURLcode rc = curl_easy_perform(dc);
     long http_code = -1;
-    curl_easy_getinfo(g_app.display_curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(hdrs);
+    curl_easy_cleanup(dc);
 
     if (rc != CURLE_OK) {
         app_log("display curl error: %s", curl_easy_strerror(rc));
