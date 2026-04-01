@@ -265,14 +265,18 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "Accept: application/json");
 
+    char cred[128];
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
     curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(dc, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(dc, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
+    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
     curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
     curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
-    /* No auth — calling from localhost, device may not require it */
 
     CURLcode rc = curl_easy_perform(dc);
     long http_code = -1;
@@ -300,20 +304,44 @@ static void display_show(const char *message) {
 }
 
 /* ── VAPIX audio clip playback ───────────────────────────────────── */
-static void play_clip(int clip_id) {
+static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
     char url[MAX_URL];
     snprintf(url, sizeof(url), MEDIACLIP_API, clip_id);
 
     CURL *c = curl_easy_init();
-    if (!c) return;
+    if (!c) {
+        if (resp_out) snprintf(resp_out, resp_sz, "curl_easy_init failed");
+        return -1;
+    }
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    CurlBuf buf = {NULL, 0};
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_USERPWD, cred);
     curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
-    curl_easy_perform(c);
+
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(c);
+
+    if (rc != CURLE_OK) {
+        app_log("play_clip curl error: %s", curl_easy_strerror(rc));
+        if (resp_out) snprintf(resp_out, resp_sz, "curl error: %s", curl_easy_strerror(rc));
+    } else {
+        app_log("play_clip id=%d http=%ld body=%s", clip_id, http_code, buf.data ? buf.data : "(empty)");
+        if (resp_out) snprintf(resp_out, resp_sz, "http=%ld body=%s", http_code, buf.data ? buf.data : "(empty)");
+    }
+    free(buf.data);
+    return (rc == CURLE_OK) ? http_code : -1;
+}
+
+static void play_clip(int clip_id) {
+    play_clip_ex(clip_id, NULL, 0);
 }
 
 /* ── Date helpers ────────────────────────────────────────────────── */
@@ -945,8 +973,13 @@ static void handle_request(int fd) {
 
     /* ── POST /test_audio ── */
     if (strcmp(method, "POST") == 0 && ROUTE("/test_audio")) {
-        play_clip(g_app.notification_clip_id);
-        http_respond(fd, 200, "application/json", "{\"message\":\"ok\"}");
+        char clip_resp[512] = "";
+        long clip_http = play_clip_ex(g_app.notification_clip_id, clip_resp, sizeof(clip_resp));
+        char out[640];
+        snprintf(out, sizeof(out),
+            "{\"message\":\"ok\",\"clip_id\":%d,\"clip_http\":%ld,\"clip_resp\":\"%s\"}",
+            g_app.notification_clip_id, clip_http, clip_resp);
+        http_respond(fd, 200, "application/json", out);
         return;
     }
 
