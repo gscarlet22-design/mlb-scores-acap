@@ -941,10 +941,16 @@ static void handle_request(int fd) {
         CURL *c = curl_easy_init();
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+        CurlBuf clips_buf = {NULL, 0};
+        curl_easy_setopt(c, CURLOPT_URL, url);
         curl_easy_setopt(c, CURLOPT_USERPWD, cred);
         curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-        char *raw = http_get(c, url);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &clips_buf);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 10L);
+        curl_easy_perform(c);
         curl_easy_cleanup(c);
+        char *raw = clips_buf.data;
 
         /* Convert VAPIX param output to JSON clip list */
         cJSON *root = cJSON_CreateObject();
