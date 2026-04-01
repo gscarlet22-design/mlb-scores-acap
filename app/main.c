@@ -751,7 +751,7 @@ static void handle_request(int fd) {
         strncpy(body_buf, body_start + 4, sizeof(body_buf)-1);
 
     /* ── GET /status ── */
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/status") == 0) {
+    if (strcmp(method, "GET") == 0 && (strcmp(path, "/status") == 0 || strcmp(path, "/api/status") == 0)) {
         pthread_mutex_lock(&g_app.lock);
         char ts[32] = "--";
         if (g_app.last_poll_time) {
@@ -795,7 +795,7 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /config ── */
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/config") == 0) {
+    if (strcmp(method, "GET") == 0 && (strcmp(path, "/config") == 0 || strcmp(path, "/api/config") == 0)) {
         pthread_mutex_lock(&g_app.lock);
         char resp[1024];
         snprintf(resp, sizeof(resp),
@@ -833,7 +833,7 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /config ── */
-    if (strcmp(method, "POST") == 0 && strcmp(path, "/config") == 0) {
+    if (strcmp(method, "POST") == 0 && (strcmp(path, "/config") == 0 || strcmp(path, "/api/config") == 0)) {
         cJSON *j = cJSON_Parse(body_buf);
         if (j) {
             pthread_mutex_lock(&g_app.lock);
@@ -911,7 +911,7 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /test_display ── */
-    if (strcmp(method, "POST") == 0 && strcmp(path, "/test_display") == 0) {
+    if (strcmp(method, "POST") == 0 && (strcmp(path, "/test_display") == 0 || strcmp(path, "/api/test_display") == 0)) {
         char tmsg[MAX_MSG];
         snprintf(tmsg, sizeof(tmsg), "MLB SCORES TEST: %s Score Display", g_app.team_name);
         display_show(tmsg);
@@ -920,14 +920,14 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /test_audio ── */
-    if (strcmp(method, "POST") == 0 && strcmp(path, "/test_audio") == 0) {
+    if (strcmp(method, "POST") == 0 && (strcmp(path, "/test_audio") == 0 || strcmp(path, "/api/test_audio") == 0)) {
         play_clip(g_app.notification_clip_id);
         http_respond(fd, 200, "application/json", "{\"message\":\"ok\"}");
         return;
     }
 
     /* ── GET /clips ── */
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/clips") == 0) {
+    if (strcmp(method, "GET") == 0 && (strcmp(path, "/clips") == 0 || strcmp(path, "/api/clips") == 0)) {
         /* Proxy VAPIX mediaclip list */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
@@ -966,7 +966,7 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /teams ── */
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/teams") == 0) {
+    if (strcmp(method, "GET") == 0 && (strcmp(path, "/teams") == 0 || strcmp(path, "/api/teams") == 0)) {
         /* Build JSON array of all teams sorted by name */
         cJSON *root = cJSON_CreateObject();
         cJSON *arr  = cJSON_AddArrayToObject(root, "teams");
@@ -986,7 +986,10 @@ static void handle_request(int fd) {
         return;
     }
 
-    http_respond(fd, 404, "application/json", "{\"error\":\"not found\"}");
+    char not_found[512];
+    snprintf(not_found, sizeof(not_found),
+        "{\"error\":\"not found\",\"method\":\"%s\",\"path\":\"%s\"}", method, path);
+    http_respond(fd, 404, "application/json", not_found);
 }
 
 static void *http_thread(void *arg) {
