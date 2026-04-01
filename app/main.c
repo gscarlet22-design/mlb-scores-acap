@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -23,6 +24,9 @@
 #include <curl/curl.h>
 #include "cJSON.h"
 #include <axsdk/axparameter.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ── Constants ──────────────────────────────────────────────────── */
 #define APP_NAME            "mlb_scores"
@@ -235,15 +239,186 @@ static char *http_get(CURL *curl, const char *url) {
     return buf.data;  /* caller must free */
 }
 
+/* ── Self-contained MD5 (RFC 1321) for digest auth ───────────────── */
+typedef struct { uint32_t s[4]; uint32_t n[2]; uint8_t buf[64]; } MD5CTX;
+static void md5_init(MD5CTX *c) {
+    c->s[0]=0x67452301; c->s[1]=0xefcdab89; c->s[2]=0x98badcfe; c->s[3]=0x10325476;
+    c->n[0]=c->n[1]=0;
+}
+static void md5_transform(uint32_t s[4], const uint8_t *b) {
+    #define F(x,y,z) ((x&y)|(~x&z))
+    #define G(x,y,z) ((x&z)|(y&~z))
+    #define H(x,y,z) (x^y^z)
+    #define I(x,y,z) (y^(x|~z))
+    #define ROL(x,n) ((x<<n)|(x>>(32-n)))
+    #define FF(a,b,c,d,x,s,t) a=b+ROL(a+F(b,c,d)+x+t,s)
+    #define GG(a,b,c,d,x,s,t) a=b+ROL(a+G(b,c,d)+x+t,s)
+    #define HH(a,b,c,d,x,s,t) a=b+ROL(a+H(b,c,d)+x+t,s)
+    #define II(a,b,c,d,x,s,t) a=b+ROL(a+I(b,c,d)+x+t,s)
+    uint32_t a=s[0],bv=s[1],cv=s[2],dv=s[3],x[16];
+    for(int i=0;i<16;i++) x[i]=(uint32_t)b[i*4]|((uint32_t)b[i*4+1]<<8)|((uint32_t)b[i*4+2]<<16)|((uint32_t)b[i*4+3]<<24);
+    FF(a,bv,cv,dv,x[0],7,0xd76aa478);FF(dv,a,bv,cv,x[1],12,0xe8c7b756);FF(cv,dv,a,bv,x[2],17,0x242070db);FF(bv,cv,dv,a,x[3],22,0xc1bdceee);
+    FF(a,bv,cv,dv,x[4],7,0xf57c0faf);FF(dv,a,bv,cv,x[5],12,0x4787c62a);FF(cv,dv,a,bv,x[6],17,0xa8304613);FF(bv,cv,dv,a,x[7],22,0xfd469501);
+    FF(a,bv,cv,dv,x[8],7,0x698098d8);FF(dv,a,bv,cv,x[9],12,0x8b44f7af);FF(cv,dv,a,bv,x[10],17,0xffff5bb1);FF(bv,cv,dv,a,x[11],22,0x895cd7be);
+    FF(a,bv,cv,dv,x[12],7,0x6b901122);FF(dv,a,bv,cv,x[13],12,0xfd987193);FF(cv,dv,a,bv,x[14],17,0xa679438e);FF(bv,cv,dv,a,x[15],22,0x49b40821);
+    GG(a,bv,cv,dv,x[1],5,0xf61e2562);GG(dv,a,bv,cv,x[6],9,0xc040b340);GG(cv,dv,a,bv,x[11],14,0x265e5a51);GG(bv,cv,dv,a,x[0],20,0xe9b6c7aa);
+    GG(a,bv,cv,dv,x[5],5,0xd62f105d);GG(dv,a,bv,cv,x[10],9,0x02441453);GG(cv,dv,a,bv,x[15],14,0xd8a1e681);GG(bv,cv,dv,a,x[4],20,0xe7d3fbc8);
+    GG(a,bv,cv,dv,x[9],5,0x21e1cde6);GG(dv,a,bv,cv,x[14],9,0xc33707d6);GG(cv,dv,a,bv,x[3],14,0xf4d50d87);GG(bv,cv,dv,a,x[8],20,0x455a14ed);
+    GG(a,bv,cv,dv,x[13],5,0xa9e3e905);GG(dv,a,bv,cv,x[2],9,0xfcefa3f8);GG(cv,dv,a,bv,x[7],14,0x676f02d9);GG(bv,cv,dv,a,x[12],20,0x8d2a4c8a);
+    HH(a,bv,cv,dv,x[5],4,0xfffa3942);HH(dv,a,bv,cv,x[8],11,0x8771f681);HH(cv,dv,a,bv,x[11],16,0x6d9d6122);HH(bv,cv,dv,a,x[14],23,0xfde5380c);
+    HH(a,bv,cv,dv,x[1],4,0xa4beea44);HH(dv,a,bv,cv,x[4],11,0x4bdecfa9);HH(cv,dv,a,bv,x[7],16,0xf6bb4b60);HH(bv,cv,dv,a,x[10],23,0xbebfbc70);
+    HH(a,bv,cv,dv,x[13],4,0x289b7ec6);HH(dv,a,bv,cv,x[0],11,0xeaa127fa);HH(cv,dv,a,bv,x[3],16,0xd4ef3085);HH(bv,cv,dv,a,x[6],23,0x04881d05);
+    HH(a,bv,cv,dv,x[9],4,0xd9d4d039);HH(dv,a,bv,cv,x[12],11,0xe6db99e5);HH(cv,dv,a,bv,x[15],16,0x1fa27cf8);HH(bv,cv,dv,a,x[2],23,0xc4ac5665);
+    II(a,bv,cv,dv,x[0],6,0xf4292244);II(dv,a,bv,cv,x[7],10,0x432aff97);II(cv,dv,a,bv,x[14],15,0xab9423a7);II(bv,cv,dv,a,x[5],21,0xfc93a039);
+    II(a,bv,cv,dv,x[12],6,0x655b59c3);II(dv,a,bv,cv,x[3],10,0x8f0ccc92);II(cv,dv,a,bv,x[10],15,0xffeff47d);II(bv,cv,dv,a,x[1],21,0x85845dd1);
+    II(a,bv,cv,dv,x[8],6,0x6fa87e4f);II(dv,a,bv,cv,x[15],10,0xfe2ce6e0);II(cv,dv,a,bv,x[6],15,0xa3014314);II(bv,cv,dv,a,x[13],21,0x4e0811a1);
+    II(a,bv,cv,dv,x[4],6,0xf7537e82);II(dv,a,bv,cv,x[11],10,0xbd3af235);II(cv,dv,a,bv,x[2],15,0x2ad7d2bb);II(bv,cv,dv,a,x[9],21,0xeb86d391);
+    s[0]+=a; s[1]+=bv; s[2]+=cv; s[3]+=dv;
+}
+static void md5_update(MD5CTX *c, const uint8_t *d, size_t len) {
+    uint32_t idx = (c->n[0]>>3)&0x3f;
+    if ((c->n[0]+=len<<3)<(uint32_t)(len<<3)) c->n[1]++;
+    c->n[1]+=len>>29;
+    uint32_t part=64-idx;
+    size_t i=0;
+    if(len>=part){memcpy(&c->buf[idx],d,part);md5_transform(c->s,c->buf);for(i=part;i+63<len;i+=64)md5_transform(c->s,d+i);idx=0;}
+    memcpy(&c->buf[idx],d+i,len-i);
+}
+static void md5_final(uint8_t out[16], MD5CTX *c) {
+    uint8_t pad[64]={0x80};
+    uint8_t bits[8];
+    for(int i=0;i<4;i++){bits[i]=(uint8_t)(c->n[0]>>(i*8));bits[i+4]=(uint8_t)(c->n[1]>>(i*8));}
+    uint32_t idx=(c->n[0]>>3)&0x3f;
+    md5_update(c,pad,idx<56?56-idx:120-idx);
+    md5_update(c,bits,8);
+    for(int i=0;i<4;i++){out[i*4]=(uint8_t)(c->s[i]);out[i*4+1]=(uint8_t)(c->s[i]>>8);out[i*4+2]=(uint8_t)(c->s[i]>>16);out[i*4+3]=(uint8_t)(c->s[i]>>24);}
+}
+static void md5hex(const char *s, char out[33]) {
+    MD5CTX c; md5_init(&c);
+    md5_update(&c,(const uint8_t*)s,strlen(s));
+    uint8_t d[16]; md5_final(d,&c);
+    for(int i=0;i<16;i++) snprintf(out+i*2,3,"%02x",d[i]);
+    out[32]='\0';
+}
+
+/* ── Raw HTTP POST with manual digest auth ───────────────────────── */
+/* Bypasses curl's broken digest+POST retry by doing the two steps manually
+   using plain TCP sockets — same socket code already used by our HTTP server. */
+static long raw_http_post_digest(const char *host, int port, const char *path,
+                                  const char *body, const char *user, const char *pass,
+                                  char *resp_out, size_t resp_sz) {
+    /* ── Step 1: unauthenticated POST to get WWW-Authenticate ── */
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        if (resp_out) snprintf(resp_out, resp_sz, "socket failed");
+        return -1;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    addr.sin_addr.s_addr = inet_addr(host);
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        if (resp_out) snprintf(resp_out, resp_sz, "connect failed");
+        return -1;
+    }
+    size_t blen = strlen(body);
+    char req1[2048];
+    int r1len = snprintf(req1, sizeof(req1),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n"
+        "%s",
+        path, host, blen, body);
+    (void)write(sock, req1, r1len);
+
+    /* Read 401 response, extract WWW-Authenticate header */
+    char rbuf[4096] = {0};
+    int rn = read(sock, rbuf, sizeof(rbuf)-1);
+    close(sock);
+    (void)rn;
+
+    /* Parse realm and nonce from WWW-Authenticate: Digest realm="...",nonce="..." */
+    char realm[128] = "", nonce[128] = "";
+    char *wa = strstr(rbuf, "WWW-Authenticate:");
+    if (!wa) {
+        /* No challenge — might be 200 already (no auth needed) or error */
+        char *status_end = strchr(rbuf, '\r');
+        if (resp_out) snprintf(resp_out, resp_sz, "no WWW-Authenticate: %.80s", rbuf);
+        (void)status_end;
+        return -1;
+    }
+    char *rp = strstr(wa, "realm=\"");
+    if (rp) { rp += 7; char *re = strchr(rp, '"'); if (re) { int l = re-rp < 127 ? re-rp : 127; strncpy(realm, rp, l); realm[l]='\0'; } }
+    char *np = strstr(wa, "nonce=\"");
+    if (np) { np += 7; char *ne = strchr(np, '"'); if (ne) { int l = ne-np < 127 ? ne-np : 127; strncpy(nonce, np, l); nonce[l]='\0'; } }
+
+    app_log("display digest realm=%s nonce=%s", realm, nonce);
+
+    /* ── Step 2: compute digest response and POST with auth ── */
+    char ha1src[256], ha2src[256], rsrc[512];
+    char ha1[33], ha2[33], resp_hash[33];
+    snprintf(ha1src, sizeof(ha1src), "%s:%s:%s", user, realm, pass);
+    snprintf(ha2src, sizeof(ha2src), "POST:%s", path);
+    md5hex(ha1src, ha1);
+    md5hex(ha2src, ha2);
+    snprintf(rsrc, sizeof(rsrc), "%s:%s:%s", ha1, nonce, ha2);
+    md5hex(rsrc, resp_hash);
+
+    char auth_hdr[512];
+    snprintf(auth_hdr, sizeof(auth_hdr),
+        "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
+        " uri=\"%s\", response=\"%s\"",
+        user, realm, nonce, path, resp_hash);
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    addr.sin_addr.s_addr = inet_addr(host);
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        if (resp_out) snprintf(resp_out, resp_sz, "connect2 failed");
+        return -1;
+    }
+    char req2[2048];
+    int r2len = snprintf(req2, sizeof(req2),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "%s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n"
+        "%s",
+        path, host, auth_hdr, blen, body);
+    (void)write(sock, req2, r2len);
+
+    char rbuf2[4096] = {0};
+    int rn2 = read(sock, rbuf2, sizeof(rbuf2)-1);
+    close(sock);
+
+    /* Parse HTTP status code */
+    long http_code = 0;
+    sscanf(rbuf2, "HTTP/%*s %ld", &http_code);
+
+    /* Find body after \r\n\r\n */
+    char *body_start = strstr(rbuf2, "\r\n\r\n");
+    const char *resp_body = body_start ? body_start + 4 : rbuf2;
+    app_log("display raw http=%ld body=%.200s", http_code, resp_body);
+    if (resp_out) snprintf(resp_out, resp_sz, "http=%ld body=%s", http_code, resp_body);
+    (void)rn2;
+    return http_code;
+}
+
 /* ── VAPIX display notification ──────────────────────────────────── */
-/* Returns HTTP status code, or -1 on curl error. Stores response in resp_out if non-NULL. */
+/* Returns HTTP status code, or -1 on error. Stores response in resp_out if non-NULL. */
 static long display_show_ex(const char *message, char *resp_out, size_t resp_sz) {
-    /* Build JSON body */
-    char body[1024];
+
     int font_size = 24;
     if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
     if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
 
+    char body[1024];
     snprintf(body, sizeof(body),
         "{\"text\":\"%s\","
         "\"duration\":%d,"
@@ -258,45 +433,13 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
         font_size,
         g_app.display_scroll_speed);
 
-    char cred[128];
-    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+    app_log("display body: %s", body);
 
-    app_log("display_show body: %s", body);
-
-    /* Two-step digest: first POST with no auth to get the nonce, then POST again
-       with auth + body. Use CURLOPT_COPYPOSTFIELDS so curl retains the body. */
-    struct curl_slist *hdrs = NULL;
-    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    hdrs = curl_slist_append(hdrs, "Expect:");
-
-    CurlBuf resp_buf = {NULL, 0};
-    CURL *dc = curl_easy_init();
-    curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
-    curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
-    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-    curl_easy_setopt(dc, CURLOPT_UNRESTRICTED_AUTH, 1L);
-    curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
-    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 10L);
-
-    CURLcode rc = curl_easy_perform(dc);
-    long http_code = -1;
-    curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(hdrs);
-    curl_easy_cleanup(dc);
-
-    if (rc != CURLE_OK) {
-        app_log("display curl error: %s", curl_easy_strerror(rc));
-        if (resp_out) snprintf(resp_out, resp_sz, "curl error: %s", curl_easy_strerror(rc));
-    } else {
-        app_log("display http=%ld body=%s", http_code, resp_buf.data ? resp_buf.data : "(empty)");
-        if (resp_out && resp_buf.data)
-            snprintf(resp_out, resp_sz, "http=%ld body=%s", http_code, resp_buf.data);
-    }
-    free(resp_buf.data);
-    return (rc == CURLE_OK) ? http_code : -1;
+    return raw_http_post_digest(
+        "127.0.0.1", 80,
+        "/config/rest/speaker-display-notification/v1/simple",
+        body, g_app.device_user, g_app.device_pass,
+        resp_out, resp_sz);
 }
 
 static void display_show(const char *message) {
@@ -762,9 +905,6 @@ static void *poll_thread(void *arg) {
 }
 
 /* ── Tiny HTTP server (same pattern as rss_reader) ───────────────── */
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 static void http_respond(int fd, int code, const char *ctype, const char *body) {
     const char *reason = (code == 200) ? "OK" : (code == 404) ? "Not Found" : "Bad Request";
@@ -988,10 +1128,9 @@ static void handle_request(int fd) {
 
     /* ── GET /clips ── */
     if (strcmp(method, "GET") == 0 && ROUTE("/clips")) {
-        /* Use mediaclip.cgi?action=list to enumerate all available clips */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
-            "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=list");
+            "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.MediaClip");
         CURL *c = curl_easy_init();
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -1009,20 +1148,17 @@ static void handle_request(int fd) {
         cJSON *root = cJSON_CreateObject();
         cJSON *arr  = cJSON_AddArrayToObject(root, "clips");
 
-        /* Always include raw response for diagnostics */
+        /* Include raw for diagnostics */
         cJSON_AddStringToObject(root, "raw", raw ? raw : "(empty)");
 
         if (raw) {
-            /* Response lines: <number> <name>  OR  clip=<n> name=<name> */
+            /* Format: root.MediaClip.C<n>.Name=<name> */
             char *line = strtok(raw, "\n");
             while (line) {
                 int idx; char name[128];
-                /* Try: "clip=N name=SomeName" format */
-                if (sscanf(line, "clip=%d name=%127[^\r\n]", &idx, name) == 2 ||
-                    /* Try: "N SomeName" format */
-                    sscanf(line, "%d %127[^\r\n]", &idx, name) == 2) {
+                if (sscanf(line, "root.MediaClip.C%d.Name=%127[^\r\n]", &idx, name) == 2) {
                     cJSON *clip = cJSON_CreateObject();
-                    cJSON_AddNumberToObject(clip, "id", idx);
+                    cJSON_AddNumberToObject(clip, "id",   idx);
                     cJSON_AddStringToObject(clip, "name", name);
                     cJSON_AddItemToArray(arr, clip);
                 }
@@ -1035,7 +1171,7 @@ static void handle_request(int fd) {
         if (cJSON_GetArraySize(arr) == 0) {
             cJSON *clip = cJSON_CreateObject();
             cJSON_AddNumberToObject(clip, "id",   38);
-            cJSON_AddStringToObject(clip, "name", "Default Notification (38)");
+            cJSON_AddStringToObject(clip, "name", "Default Notification");
             cJSON_AddItemToArray(arr, clip);
         }
 
