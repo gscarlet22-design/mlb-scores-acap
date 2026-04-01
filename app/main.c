@@ -264,16 +264,16 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    hdrs = curl_slist_append(hdrs, "Expect:");  /* suppress 100-continue so body is sent on first request */
 
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
 
     curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(dc, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(dc, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);  /* copy ensures body survives digest auth retry */
     curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
     curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
     curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
@@ -1024,20 +1024,12 @@ static void handle_request(int fd) {
             free(raw);
         }
 
-        /* If no clips parsed, return a set of known built-in system sound IDs */
+        /* If no clips parsed, fall back to known working default */
         if (cJSON_GetArraySize(arr) == 0) {
-            static const struct { int id; const char *name; } builtin[] = {
-                {1,  "Ding"},
-                {2,  "Chime"},
-                {3,  "Beep"},
-                {38, "Default Notification"},
-            };
-            for (int i = 0; i < (int)(sizeof(builtin)/sizeof(builtin[0])); i++) {
-                cJSON *clip = cJSON_CreateObject();
-                cJSON_AddNumberToObject(clip, "id",   builtin[i].id);
-                cJSON_AddStringToObject(clip, "name", builtin[i].name);
-                cJSON_AddItemToArray(arr, clip);
-            }
+            cJSON *clip = cJSON_CreateObject();
+            cJSON_AddNumberToObject(clip, "id",   38);
+            cJSON_AddStringToObject(clip, "name", "Default Notification (38)");
+            cJSON_AddItemToArray(arr, clip);
         }
 
         char *out = cJSON_PrintUnformatted(root);
