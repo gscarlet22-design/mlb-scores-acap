@@ -109,8 +109,6 @@
                 if (selectedId && String(t.id) === String(selectedId)) opt.selected = true;
                 sel.appendChild(opt);
             });
-            /* Apply colors for the currently selected team */
-            if (selectedId) applyTeamColors(selectedId);
         }).catch(function () {});
     }
 
