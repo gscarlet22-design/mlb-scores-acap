@@ -739,7 +739,7 @@ static void handle_request(int fd) {
             struct tm *tm = localtime(&g_app.last_poll_time);
             strftime(ts, sizeof(ts), "%H:%M:%S", tm);
         }
-        char resp[1024];
+        char resp[2048];
         snprintf(resp, sizeof(resp),
             "{\"enabled\":%s,\"game_pk\":%d,"
             "\"team_id\":%d,\"team_name\":\"%s\","
@@ -749,7 +749,11 @@ static void handle_request(int fd) {
             "\"inning_state\":\"%s\",\"inning\":%d,\"outs\":%d,"
             "\"last_play\":\"%s\","
             "\"last_poll_time\":\"%s\","
-            "\"is_live\":%s}",
+            "\"is_live\":%s,"
+            "\"next_game_opponent\":\"%s\","
+            "\"next_game_date\":\"%s\","
+            "\"next_game_time\":\"%s\","
+            "\"next_game_home\":%s}",
             g_app.enabled ? "true" : "false",
             g_app.current_game_pk,
             g_app.team_id, g_app.team_name,
@@ -759,7 +763,11 @@ static void handle_request(int fd) {
             g_app.inning_state, g_app.inning, g_app.outs,
             g_app.last_play,
             ts,
-            g_app.is_live ? "true" : "false");
+            g_app.is_live ? "true" : "false",
+            g_app.next_game_opponent,
+            g_app.next_game_date,
+            g_app.next_game_time,
+            g_app.next_game_home ? "true" : "false");
         pthread_mutex_unlock(&g_app.lock);
         http_respond(fd, 200, "application/json", resp);
         return;
