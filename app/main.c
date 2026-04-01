@@ -750,8 +750,14 @@ static void handle_request(int fd) {
     if (body_start && strcmp(method, "POST") == 0)
         strncpy(body_buf, body_start + 4, sizeof(body_buf)-1);
 
+    /* Strip any leading prefix (e.g. /local/mlb_scores/api) down to the route */
+    const char *route = strrchr(path, '/');
+    if (!route) route = path;
+    /* Check full suffix for routes that share a prefix like /config */
+    #define ROUTE(r) (strstr(path, (r)) != NULL)
+
     /* ── GET /status ── */
-    if (strcmp(method, "GET") == 0 && (strcmp(path, "/status") == 0 || strcmp(path, "/api/status") == 0)) {
+    if (strcmp(method, "GET") == 0 && ROUTE("/status")) {
         pthread_mutex_lock(&g_app.lock);
         char ts[32] = "--";
         if (g_app.last_poll_time) {
@@ -795,7 +801,7 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /config ── */
-    if (strcmp(method, "GET") == 0 && (strcmp(path, "/config") == 0 || strcmp(path, "/api/config") == 0)) {
+    if (strcmp(method, "GET") == 0 && ROUTE("/config")) {
         pthread_mutex_lock(&g_app.lock);
         char resp[1024];
         snprintf(resp, sizeof(resp),
@@ -833,7 +839,7 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /config ── */
-    if (strcmp(method, "POST") == 0 && (strcmp(path, "/config") == 0 || strcmp(path, "/api/config") == 0)) {
+    if (strcmp(method, "POST") == 0 && ROUTE("/config")) {
         cJSON *j = cJSON_Parse(body_buf);
         if (j) {
             pthread_mutex_lock(&g_app.lock);
@@ -911,7 +917,7 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /test_display ── */
-    if (strcmp(method, "POST") == 0 && (strcmp(path, "/test_display") == 0 || strcmp(path, "/api/test_display") == 0)) {
+    if (strcmp(method, "POST") == 0 && ROUTE("/test_display")) {
         char tmsg[MAX_MSG];
         snprintf(tmsg, sizeof(tmsg), "MLB SCORES TEST: %s Score Display", g_app.team_name);
         display_show(tmsg);
@@ -920,14 +926,14 @@ static void handle_request(int fd) {
     }
 
     /* ── POST /test_audio ── */
-    if (strcmp(method, "POST") == 0 && (strcmp(path, "/test_audio") == 0 || strcmp(path, "/api/test_audio") == 0)) {
+    if (strcmp(method, "POST") == 0 && ROUTE("/test_audio")) {
         play_clip(g_app.notification_clip_id);
         http_respond(fd, 200, "application/json", "{\"message\":\"ok\"}");
         return;
     }
 
     /* ── GET /clips ── */
-    if (strcmp(method, "GET") == 0 && (strcmp(path, "/clips") == 0 || strcmp(path, "/api/clips") == 0)) {
+    if (strcmp(method, "GET") == 0 && ROUTE("/clips")) {
         /* Proxy VAPIX mediaclip list */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
@@ -966,7 +972,7 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /teams ── */
-    if (strcmp(method, "GET") == 0 && (strcmp(path, "/teams") == 0 || strcmp(path, "/api/teams") == 0)) {
+    if (strcmp(method, "GET") == 0 && ROUTE("/teams")) {
         /* Build JSON array of all teams sorted by name */
         cJSON *root = cJSON_CreateObject();
         cJSON *arr  = cJSON_AddArrayToObject(root, "teams");
