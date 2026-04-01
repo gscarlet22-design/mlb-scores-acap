@@ -236,14 +236,10 @@ static char *http_get(CURL *curl, const char *url) {
 }
 
 /* ── VAPIX display notification ──────────────────────────────────── */
-static void display_show(const char *message) {
-    if (!g_app.display_enabled) return;
-    if (strncmp(message, g_app.last_display_msg, MAX_MSG - 1) == 0) return;
-    strncpy(g_app.last_display_msg, message, MAX_MSG - 1);
-
+/* Returns HTTP status code, or -1 on curl error. Stores response in resp_out if non-NULL. */
+static long display_show_ex(const char *message, char *resp_out, size_t resp_sz) {
     /* Build JSON body */
     char body[1024];
-    /* text-size map: small=18, medium=24, large=32 */
     int font_size = 24;
     if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
     if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
@@ -262,10 +258,13 @@ static void display_show(const char *message) {
         font_size,
         g_app.display_scroll_speed);
 
+    CurlBuf resp_buf = {NULL, 0};
     curl_easy_reset(g_app.display_curl);
     curl_easy_setopt(g_app.display_curl, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(g_app.display_curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(g_app.display_curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(g_app.display_curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(g_app.display_curl, CURLOPT_WRITEDATA, &resp_buf);
 
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -277,12 +276,27 @@ static void display_show(const char *message) {
     curl_easy_setopt(g_app.display_curl, CURLOPT_HTTPHEADER, hdrs);
 
     CURLcode rc = curl_easy_perform(g_app.display_curl);
+    long http_code = -1;
+    curl_easy_getinfo(g_app.display_curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(hdrs);
 
-    if (rc != CURLE_OK)
-        app_log("display failed: %s", curl_easy_strerror(rc));
-    else
-        app_log("display: %s", message);
+    if (rc != CURLE_OK) {
+        app_log("display curl error: %s", curl_easy_strerror(rc));
+        if (resp_out) snprintf(resp_out, resp_sz, "curl error: %s", curl_easy_strerror(rc));
+    } else {
+        app_log("display http=%ld body=%s", http_code, resp_buf.data ? resp_buf.data : "(empty)");
+        if (resp_out && resp_buf.data)
+            snprintf(resp_out, resp_sz, "http=%ld body=%s", http_code, resp_buf.data);
+    }
+    free(resp_buf.data);
+    return (rc == CURLE_OK) ? http_code : -1;
+}
+
+static void display_show(const char *message) {
+    if (!g_app.display_enabled) return;
+    if (strncmp(message, g_app.last_display_msg, MAX_MSG - 1) == 0) return;
+    strncpy(g_app.last_display_msg, message, MAX_MSG - 1);
+    display_show_ex(message, NULL, 0);
 }
 
 /* ── VAPIX audio clip playback ───────────────────────────────────── */
@@ -920,8 +934,12 @@ static void handle_request(int fd) {
     if (strcmp(method, "POST") == 0 && ROUTE("/test_display")) {
         char tmsg[MAX_MSG];
         snprintf(tmsg, sizeof(tmsg), "MLB SCORES TEST: %s Score Display", g_app.team_name);
-        display_show(tmsg);
-        http_respond(fd, 200, "application/json", "{\"message\":\"ok\"}");
+        memset(g_app.last_display_msg, 0, sizeof(g_app.last_display_msg));
+        char disp_resp[512] = "";
+        long http_code = display_show_ex(tmsg, disp_resp, sizeof(disp_resp));
+        char out[640];
+        snprintf(out, sizeof(out), "{\"message\":\"ok\",\"display_http\":%ld,\"display_resp\":\"%s\"}", http_code, disp_resp);
+        http_respond(fd, 200, "application/json", out);
         return;
     }
 
@@ -934,10 +952,10 @@ static void handle_request(int fd) {
 
     /* ── GET /clips ── */
     if (strcmp(method, "GET") == 0 && ROUTE("/clips")) {
-        /* Proxy VAPIX mediaclip list */
+        /* Use mediaclip.cgi?action=list to enumerate all available clips */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
-            "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.MediaClip");
+            "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=list");
         CURL *c = curl_easy_init();
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -952,15 +970,17 @@ static void handle_request(int fd) {
         curl_easy_cleanup(c);
         char *raw = clips_buf.data;
 
-        /* Convert VAPIX param output to JSON clip list */
         cJSON *root = cJSON_CreateObject();
         cJSON *arr  = cJSON_AddArrayToObject(root, "clips");
         if (raw) {
+            /* Response lines: <number> <name>  OR  clip=<n> name=<name> */
             char *line = strtok(raw, "\n");
             while (line) {
-                /* Line format: root.MediaClip.C1.Name=SomeName */
                 int idx; char name[128];
-                if (sscanf(line, "root.MediaClip.C%d.Name=%127[^\r]", &idx, name) == 2) {
+                /* Try: "clip=N name=SomeName" format */
+                if (sscanf(line, "clip=%d name=%127[^\r\n]", &idx, name) == 2 ||
+                    /* Try: "N SomeName" format */
+                    sscanf(line, "%d %127[^\r\n]", &idx, name) == 2) {
                     cJSON *clip = cJSON_CreateObject();
                     cJSON_AddNumberToObject(clip, "id", idx);
                     cJSON_AddStringToObject(clip, "name", name);
@@ -970,6 +990,23 @@ static void handle_request(int fd) {
             }
             free(raw);
         }
+
+        /* If no clips parsed, return a set of known built-in system sound IDs */
+        if (cJSON_GetArraySize(arr) == 0) {
+            static const struct { int id; const char *name; } builtin[] = {
+                {1,  "Ding"},
+                {2,  "Chime"},
+                {3,  "Beep"},
+                {38, "Default Notification"},
+            };
+            for (int i = 0; i < (int)(sizeof(builtin)/sizeof(builtin[0])); i++) {
+                cJSON *clip = cJSON_CreateObject();
+                cJSON_AddNumberToObject(clip, "id",   builtin[i].id);
+                cJSON_AddStringToObject(clip, "name", builtin[i].name);
+                cJSON_AddItemToArray(arr, clip);
+            }
+        }
+
         char *out = cJSON_PrintUnformatted(root);
         http_respond(fd, 200, "application/json", out ? out : "{}");
         free(out);
