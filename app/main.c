@@ -258,20 +258,33 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
         font_size,
         g_app.display_scroll_speed);
 
-    CurlBuf resp_buf = {NULL, 0};
-    CURL *dc = curl_easy_init();
-
-    struct curl_slist *hdrs = NULL;
-    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    hdrs = curl_slist_append(hdrs, "Accept: application/json");
-    hdrs = curl_slist_append(hdrs, "Expect:");  /* suppress 100-continue so body is sent on first request */
-
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
 
+    /* Pre-authenticate: send a GET to prime curl's digest nonce cache so the
+       subsequent POST goes out with Authorization already set on the first
+       attempt — body is never dropped on a retry. */
+    CURL *dc = curl_easy_init();
+    curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_STOP_API);
+    curl_easy_setopt(dc, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
+    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);  /* discard response */
+    CurlBuf discard = {NULL, 0};
+    curl_easy_setopt(dc, CURLOPT_WRITEDATA, &discard);
+    curl_easy_perform(dc);  /* ignore result — just priming auth */
+    free(discard.data);
+
+    /* Now POST — curl sends pre-emptive digest auth, body intact on first request */
+    struct curl_slist *hdrs = NULL;
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Expect:");
+
+    CurlBuf resp_buf = {NULL, 0};
     curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);  /* copy ensures body survives digest auth retry */
+    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
     curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
     curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
     curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
@@ -1005,6 +1018,10 @@ static void handle_request(int fd) {
 
         cJSON *root = cJSON_CreateObject();
         cJSON *arr  = cJSON_AddArrayToObject(root, "clips");
+
+        /* Always include raw response for diagnostics */
+        cJSON_AddStringToObject(root, "raw", raw ? raw : "(empty)");
+
         if (raw) {
             /* Response lines: <number> <name>  OR  clip=<n> name=<name> */
             char *line = strtok(raw, "\n");
