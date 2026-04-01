@@ -269,8 +269,7 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
 
     curl_easy_setopt(g_app.display_curl, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(g_app.display_curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(g_app.display_curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(g_app.display_curl, CURLOPT_COPYPOSTFIELDS, body);
     curl_easy_setopt(g_app.display_curl, CURLOPT_USERPWD, cred);
     curl_easy_setopt(g_app.display_curl, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
     curl_easy_setopt(g_app.display_curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
