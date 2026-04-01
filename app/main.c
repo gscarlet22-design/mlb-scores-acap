@@ -1,5 +1,6 @@
 /*
- * mlb_scores - MLB live score ACAP for Axis C1720
+ * mlb_scores - MLB live score ACAP
+ * Vendor: gscarlet22 design for Axis C1720
  * Polls MLB StatsAPI (free, no key) and pushes score updates to the
  * C1720 speaker display and triggers an audio clip on scoring plays.
  * The followed team is user-selectable via the web UI.
@@ -37,38 +38,39 @@
 #define HTTP_PORT           2016
 
 /* ── MLB team lookup table ──────────────────────────────────────── */
-typedef struct { int id; const char *name; const char *abbr; } MlbTeam;
+typedef struct { int id; const char *name; const char *abbr; const char *bg; const char *fg; } MlbTeam;
 static const MlbTeam MLB_TEAMS[] = {
-    {108, "Angels",          "LAA"},
-    {109, "Diamondbacks",    "ARI"},
-    {110, "Orioles",         "BAL"},
-    {111, "Red Sox",         "BOS"},
-    {112, "Cubs",            "CHC"},
-    {113, "Reds",            "CIN"},
-    {114, "Guardians",       "CLE"},
-    {115, "Rockies",         "COL"},
-    {116, "Tigers",          "DET"},
-    {117, "Astros",          "HOU"},
-    {118, "Royals",          "KC"},
-    {119, "Dodgers",         "LAD"},
-    {120, "Nationals",       "WSH"},
-    {121, "Mets",            "NYM"},
-    {133, "Athletics",       "OAK"},
-    {134, "Pirates",         "PIT"},
-    {135, "Padres",          "SD"},
-    {136, "Mariners",        "SEA"},
-    {137, "Giants",          "SF"},
-    {138, "Cardinals",       "STL"},
-    {139, "Rays",            "TB"},
-    {140, "Rangers",         "TEX"},
-    {141, "Blue Jays",       "TOR"},
-    {142, "Twins",           "MIN"},
-    {143, "Phillies",        "PHI"},
-    {144, "Braves",          "ATL"},
-    {145, "White Sox",       "CWS"},
-    {146, "Marlins",         "MIA"},
-    {147, "Yankees",         "NYY"},
-    {158, "Brewers",         "MIL"},
+    /* id   name              abbr    bg(dark)    fg(light) */
+    {108, "Angels",          "LAA",  "#BA0021",  "#C4CED4"},
+    {109, "Diamondbacks",    "ARI",  "#A71930",  "#E3D4AD"},
+    {110, "Orioles",         "BAL",  "#DF4601",  "#000000"},
+    {111, "Red Sox",         "BOS",  "#BD3039",  "#0D2B56"},
+    {112, "Cubs",            "CHC",  "#0E3386",  "#CC3433"},
+    {113, "Reds",            "CIN",  "#C6011F",  "#FFFFFF"},
+    {114, "Guardians",       "CLE",  "#00385D",  "#E31937"},
+    {115, "Rockies",         "COL",  "#333366",  "#C4CED4"},
+    {116, "Tigers",          "DET",  "#0C2340",  "#FA4616"},
+    {117, "Astros",          "HOU",  "#002D62",  "#EB6E1F"},
+    {118, "Royals",          "KC",   "#004687",  "#C09A5B"},
+    {119, "Dodgers",         "LAD",  "#005A9C",  "#FFFFFF"},
+    {120, "Nationals",       "WSH",  "#AB0003",  "#14225A"},
+    {121, "Mets",            "NYM",  "#002D72",  "#FF5910"},
+    {133, "Athletics",       "OAK",  "#003831",  "#EFB21E"},
+    {134, "Pirates",         "PIT",  "#27251F",  "#FDB827"},
+    {135, "Padres",          "SD",   "#2F241D",  "#FFC425"},
+    {136, "Mariners",        "SEA",  "#0C2C56",  "#005C5C"},
+    {137, "Giants",          "SF",   "#FD5A1E",  "#27251F"},
+    {138, "Cardinals",       "STL",  "#C41E3A",  "#FEDB00"},
+    {139, "Rays",            "TB",   "#092C5C",  "#8FBCE6"},
+    {140, "Rangers",         "TEX",  "#003278",  "#C0111F"},
+    {141, "Blue Jays",       "TOR",  "#134A8E",  "#E8291C"},
+    {142, "Twins",           "MIN",  "#002B5C",  "#D31145"},
+    {143, "Phillies",        "PHI",  "#E81828",  "#002D72"},
+    {144, "Braves",          "ATL",  "#CE1141",  "#13274F"},
+    {145, "White Sox",       "CWS",  "#27251F",  "#C4CED4"},
+    {146, "Marlins",         "MIA",  "#00A3E0",  "#EF3340"},
+    {147, "Yankees",         "NYY",  "#0C2340",  "#C4CED4"},
+    {158, "Brewers",         "MIL",  "#FFC52F",  "#12284B"},
 };
 #define NUM_TEAMS (int)(sizeof(MLB_TEAMS) / sizeof(MLB_TEAMS[0]))
 
@@ -137,6 +139,12 @@ typedef struct {
     time_t last_poll_time;
     int    is_live;
 
+    /* next game (when no game today) */
+    char   next_game_opponent[64];
+    char   next_game_date[32];   /* "Apr 3" */
+    char   next_game_time[32];   /* "7:10 PM" */
+    int    next_game_home;       /* 1 = home, 0 = away */
+
     pthread_mutex_t lock;
     AXParameter    *ax_params;
     CURL           *display_curl;
@@ -172,6 +180,10 @@ static AppState g_app = {
     .last_display_msg    = "",
     .last_poll_time      = 0,
     .is_live             = 0,
+    .next_game_opponent  = "",
+    .next_game_date      = "",
+    .next_game_time      = "",
+    .next_game_home      = 0,
     .running             = 1,
 };
 
@@ -210,19 +222,25 @@ static void display_show(const char *message) {
     if (strncmp(message, g_app.last_display_msg, MAX_MSG - 1) == 0) return;
     strncpy(g_app.last_display_msg, message, MAX_MSG - 1);
 
-    /* Build JSON body — C1710/C1720 speaker-display-notification v1 API
-       expects: { "data": { "message", "duration": {"type","value"}, ... } } */
+    /* Build JSON body */
     char body[1024];
+    /* text-size map: small=18, medium=24, large=32 */
+    int font_size = 24;
+    if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
+    if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
+
     snprintf(body, sizeof(body),
-        "{\"data\":{\"message\":\"%s\","
-        "\"duration\":{\"type\":\"time\",\"value\":%d},"
+        "{\"text\":\"%s\","
+        "\"duration\":%d,"
         "\"textColor\":\"%s\","
         "\"backgroundColor\":\"%s\","
-        "\"scrollSpeed\":%d}}",
+        "\"fontSize\":%d,"
+        "\"scrollSpeed\":%d}",
         message,
         g_app.display_duration_ms,
         g_app.display_text_color,
         g_app.display_bg_color,
+        font_size,
         g_app.display_scroll_speed);
 
     curl_easy_reset(g_app.display_curl);
@@ -270,6 +288,124 @@ static void today_str(char *buf, size_t n) {
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     strftime(buf, n, "%Y-%m-%d", tm);
+}
+
+/* ── Date offset helper ─────────────────────────────────────────── */
+static void date_offset_str(char *buf, size_t n, int days_ahead) {
+    time_t t = time(NULL) + (time_t)days_ahead * 86400;
+    struct tm *tm = localtime(&t);
+    strftime(buf, n, "%Y-%m-%d", tm);
+}
+
+/* ── Format ISO datetime "2026-04-03T19:10:00Z" → "Apr 3, 7:10 PM" ─ */
+static void format_game_time(const char *iso, char *date_out, size_t dn,
+                              char *time_out, size_t tn) {
+    /* Parse: YYYY-MM-DDTHH:MM */
+    int yr=0, mo=0, dy=0, hr=0, mn=0;
+    sscanf(iso, "%d-%d-%dT%d:%d", &yr, &mo, &dy, &hr, &mn);
+
+    /* Month abbreviation */
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                   "Jul","Aug","Sep","Oct","Nov","Dec"};
+    const char *mon = (mo >= 1 && mo <= 12) ? months[mo-1] : "???";
+    snprintf(date_out, dn, "%s %d", mon, dy);
+
+    /* Convert UTC to local time using mktime trick */
+    struct tm t = {0};
+    t.tm_year = yr - 1900;
+    t.tm_mon  = mo - 1;
+    t.tm_mday = dy;
+    t.tm_hour = hr;
+    t.tm_min  = mn;
+    t.tm_isdst = -1;
+    /* mktime treats as local — use gmtime offset to convert from UTC */
+    time_t utc = mktime(&t);
+    struct tm *local = localtime(&utc);
+    int lhr = local->tm_hour;
+    int lmn = local->tm_min;
+    snprintf(time_out, tn, "%d:%02d %s",
+             lhr % 12 == 0 ? 12 : lhr % 12, lmn,
+             lhr < 12 ? "AM" : "PM");
+}
+
+/* ── MLB API: find next scheduled game within 14 days ───────────── */
+static int fetch_next_game(CURL *curl) {
+    /* Query a 14-day window starting tomorrow */
+    char start[16], end[16], url[MAX_URL];
+    date_offset_str(start, sizeof(start), 1);
+    date_offset_str(end,   sizeof(end),   14);
+    snprintf(url, sizeof(url),
+        MLB_API_BASE "/schedule?sportId=1&teamId=%d&startDate=%s&endDate=%s&hydrate=team",
+        g_app.team_id, start, end);
+
+    char *body = http_get(curl, url);
+    if (!body) return 0;
+
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) return 0;
+
+    int found = 0;
+    cJSON *dates = cJSON_GetObjectItem(root, "dates");
+    if (cJSON_IsArray(dates)) {
+        /* Walk dates in order — first game found is the next one */
+        int nd = cJSON_GetArraySize(dates);
+        for (int di = 0; di < nd && !found; di++) {
+            cJSON *day   = cJSON_GetArrayItem(dates, di);
+            cJSON *games = cJSON_GetObjectItem(day, "games");
+            if (!cJSON_IsArray(games)) continue;
+            int ng = cJSON_GetArraySize(games);
+            for (int gi = 0; gi < ng && !found; gi++) {
+                cJSON *game = cJSON_GetArrayItem(games, gi);
+
+                /* Get game time */
+                cJSON *gt = cJSON_GetObjectItem(game, "gameDate");
+                if (!cJSON_IsString(gt)) continue;
+
+                /* Get opponent name and home/away */
+                cJSON *teams = cJSON_GetObjectItem(game, "teams");
+                if (!teams) continue;
+                cJSON *home = cJSON_GetObjectItem(teams, "home");
+                cJSON *away = cJSON_GetObjectItem(teams, "away");
+                if (!home || !away) continue;
+
+                /* Determine which side we are */
+                int is_home = 0;
+                cJSON *ht = cJSON_GetObjectItem(home, "team");
+                if (ht) {
+                    cJSON *hid = cJSON_GetObjectItem(ht, "id");
+                    if (cJSON_IsNumber(hid) && (int)hid->valuedouble == g_app.team_id)
+                        is_home = 1;
+                }
+                cJSON *opp_team = cJSON_GetObjectItem(is_home ? away : home, "team");
+                if (!opp_team) continue;
+                cJSON *opp_name = cJSON_GetObjectItem(opp_team, "teamName");
+                if (!cJSON_IsString(opp_name)) continue;
+
+                /* Store results */
+                strncpy(g_app.next_game_opponent, opp_name->valuestring,
+                        sizeof(g_app.next_game_opponent)-1);
+                g_app.next_game_home = is_home;
+                format_game_time(gt->valuestring,
+                                 g_app.next_game_date, sizeof(g_app.next_game_date),
+                                 g_app.next_game_time, sizeof(g_app.next_game_time));
+                found = 1;
+                app_log("next game: %s %s vs %s @ %s %s",
+                        is_home ? "home" : "away",
+                        g_app.team_name, g_app.next_game_opponent,
+                        g_app.next_game_date, g_app.next_game_time);
+            }
+        }
+    }
+
+    if (!found) {
+        g_app.next_game_opponent[0] = '\0';
+        g_app.next_game_date[0]     = '\0';
+        g_app.next_game_time[0]     = '\0';
+    }
+
+    cJSON_Delete(root);
+    return found;
 }
 
 /* ── MLB API: find today's game for the selected team ────────────── */
@@ -456,10 +592,16 @@ static void poll_once(void) {
     if (g_app.current_game_pk == 0) {
         int pk = fetch_game_pk(g_app.fetch_curl);
         if (pk == 0) {
-            app_log("no game today");
+            app_log("no game today — looking ahead");
+            /* Clear any stale next-game info then re-fetch */
+            g_app.next_game_opponent[0] = '\0';
+            fetch_next_game(g_app.fetch_curl);
+            g_app.last_poll_time = time(NULL);
             pthread_mutex_unlock(&g_app.lock);
             return;
         }
+        /* Found a game today — clear next-game info */
+        g_app.next_game_opponent[0] = '\0';
         g_app.current_game_pk = pk;
         app_log("found game pk=%d", pk);
     }
@@ -511,10 +653,8 @@ static void poll_once(void) {
 
     pthread_mutex_unlock(&g_app.lock);
 
-    int is_final = (strcmp(live.state, "Final") == 0);
-
-    /* Always update display when live, score changed, or game just ended */
-    if (g_app.is_live || score_changed || is_final)
+    /* Always update display when live or score changed */
+    if (g_app.is_live || score_changed)
         display_show(msg);
 
     /* Play clip on scoring plays */
@@ -523,29 +663,24 @@ static void poll_once(void) {
     else if (score_changed)
         play_clip(g_app.notification_clip_id);
 
-    /* After final: either persist the score on display or just wait and reset */
-    if (is_final) {
-        if (g_app.display_persist_final && g_app.display_enabled) {
-            /* Keep resending so the final score stays on screen.
-               Loop until the local date rolls over (i.e. past midnight). */
-            char game_date[16];
-            today_str(game_date, sizeof(game_date));
-
-            int resend_sec = (g_app.display_duration_ms / 1000) - 2;
-            if (resend_sec < 5) resend_sec = 5;
-
-            while (g_app.running && g_app.display_persist_final) {
-                sleep(resend_sec);
-                char now_date[16];
-                today_str(now_date, sizeof(now_date));
-                if (strcmp(now_date, game_date) != 0) break;  /* past midnight */
-                g_app.last_display_msg[0] = '\0';
-                display_show(msg);
-            }
+    /* Reset game_pk after final */
+    if (strcmp(live.state, "Final") == 0) {
+        if (g_app.display_persist_final) {
+            /* Keep final score on display until midnight */
+            time_t now = time(NULL);
+            struct tm *tm_now = localtime(&now);
+            int secs_until_midnight = (23 - tm_now->tm_hour) * 3600
+                                    + (59 - tm_now->tm_min)  * 60
+                                    + (59 - tm_now->tm_sec)  + 1;
+            app_log("final: persisting display for %ds until midnight", secs_until_midnight);
+            sleep(secs_until_midnight);
         } else {
             sleep(60);
         }
         g_app.current_game_pk = 0;
+        g_app.my_score        = 0;
+        g_app.opponent_score  = 0;
+        memset(g_app.last_display_msg, 0, sizeof(g_app.last_display_msg));
     }
 }
 
@@ -587,16 +722,8 @@ static void handle_request(int fd) {
     if (n <= 0) return;
 
     /* Extract method and path */
-    char method[8], raw_path[256];
-    sscanf(req, "%7s %255s", method, raw_path);
-
-    /* Axis reverse-proxy may forward the full URI including the
-       /local/<appname>/api prefix.  Normalise so handler matching
-       always sees paths starting with "/api/".                      */
-    const char *prefix = "/local/mlb_scores";
-    const char *path = raw_path;
-    if (strncmp(raw_path, prefix, strlen(prefix)) == 0)
-        path = raw_path + strlen(prefix);
+    char method[8], path[256];
+    sscanf(req, "%7s %255s", method, path);
 
     /* Read body for POSTs */
     char body_buf[4096] = {0};
@@ -653,7 +780,6 @@ static void handle_request(int fd) {
             "\"display_text_color\":\"%s\","
             "\"display_bg_color\":\"%s\","
             "\"display_scroll_speed\":\"%d\","
-            "\"display_persist_final\":\"%s\","
             "\"display_duration_ms\":\"%d\","
             "\"device_user\":\"%s\","
             "\"device_pass_set\":%s}",
@@ -772,26 +898,16 @@ static void handle_request(int fd) {
 
     /* ── GET /clips ── */
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/clips") == 0) {
-        /* Proxy VAPIX mediaclip list — set credentials after http_get's
-           curl_easy_reset so they aren't wiped.                          */
+        /* Proxy VAPIX mediaclip list */
         char url[MAX_URL];
         snprintf(url, sizeof(url),
             "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.MediaClip");
         CURL *c = curl_easy_init();
-        CurlBuf buf = {NULL, 0};
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
-        curl_easy_setopt(c, CURLOPT_URL, url);
-        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
-        curl_easy_setopt(c, CURLOPT_TIMEOUT, 10L);
-        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(c, CURLOPT_USERAGENT, APP_NAME "/1.0");
         curl_easy_setopt(c, CURLOPT_USERPWD, cred);
         curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-        CURLcode rc = curl_easy_perform(c);
-        char *raw = (rc == CURLE_OK) ? buf.data : NULL;
-        if (rc != CURLE_OK) free(buf.data);
+        char *raw = http_get(c, url);
         curl_easy_cleanup(c);
 
         /* Convert VAPIX param output to JSON clip list */
@@ -800,10 +916,9 @@ static void handle_request(int fd) {
         if (raw) {
             char *line = strtok(raw, "\n");
             while (line) {
-                /* Line format varies by model: root.MediaClip.C1.Name=...
-                   or root.MediaClip.M36.Name=... — skip the letter prefix */
-                int idx; char name[128]; char prefix;
-                if (sscanf(line, "root.MediaClip.%c%d.Name=%127[^\r]", &prefix, &idx, name) == 3) {
+                /* Line format: root.MediaClip.C1.Name=SomeName */
+                int idx; char name[128];
+                if (sscanf(line, "root.MediaClip.C%d.Name=%127[^\r]", &idx, name) == 2) {
                     cJSON *clip = cJSON_CreateObject();
                     cJSON_AddNumberToObject(clip, "id", idx);
                     cJSON_AddStringToObject(clip, "name", name);
@@ -830,6 +945,8 @@ static void handle_request(int fd) {
             cJSON_AddNumberToObject(t, "id",   MLB_TEAMS[i].id);
             cJSON_AddStringToObject(t, "name", MLB_TEAMS[i].name);
             cJSON_AddStringToObject(t, "abbr", MLB_TEAMS[i].abbr);
+            cJSON_AddStringToObject(t, "bg",   MLB_TEAMS[i].bg);
+            cJSON_AddStringToObject(t, "fg",   MLB_TEAMS[i].fg);
             cJSON_AddItemToArray(arr, t);
         }
         char *out = cJSON_PrintUnformatted(root);
@@ -881,9 +998,6 @@ static void load_params(void) {
 #define GETINT(name, field) \
     if (ax_parameter_get(p, name, &v, NULL) && v) { \
         g_app.field = atoi(v); g_free(v); v=NULL; }
-#define GETINT_NZ(name, field) \
-    if (ax_parameter_get(p, name, &v, NULL) && v) { \
-        int _tmp = atoi(v); if (_tmp) g_app.field = _tmp; g_free(v); v=NULL; }
 #define GETBOOL(name, field) \
     if (ax_parameter_get(p, name, &v, NULL) && v) { \
         g_app.field = (strcmp(v,"true")==0); g_free(v); v=NULL; }
@@ -891,8 +1005,8 @@ static void load_params(void) {
     GETBOOL("Enabled",            enabled)
     GETINT("TeamId",              team_id)
     GETINT("PollIntervalSec",     poll_interval_sec)
-    GETINT_NZ("NotificationClipId",  notification_clip_id)
-    GETINT_NZ("ScoreClipId",         score_clip_id)
+    GETINT("NotificationClipId",  notification_clip_id)
+    GETINT("ScoreClipId",         score_clip_id)
     GETBOOL("DisplayEnabled",     display_enabled)
     GETSTR("DisplayTextSize",     display_text_size)
     GETSTR("DisplayTextColor",    display_text_color)
