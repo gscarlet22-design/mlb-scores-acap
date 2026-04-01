@@ -53,8 +53,21 @@
                 stateEl.textContent = d.game_state || 'Scheduled';
                 document.getElementById('inning-info').textContent = '';
                 document.getElementById('outs-info').textContent   = '';
+            } else if (d.next_game_opponent) {
+                /* Show next scheduled game */
+                var atHome  = d.next_game_home;
+                var vs      = atHome ? 'vs' : '@';
+                stateEl.textContent = 'Next Game';
+                board.classList.add('no-game');
+                document.getElementById('my-score').textContent  = '—';
+                document.getElementById('opp-score').textContent = '—';
+                document.getElementById('opp-name').textContent  = d.next_game_opponent;
+                document.getElementById('inning-info').textContent =
+                    vs + ' ' + d.next_game_opponent;
+                document.getElementById('outs-info').textContent =
+                    d.next_game_date + '  ' + d.next_game_time;
             } else {
-                stateEl.textContent = 'No Game Today';
+                stateEl.textContent = 'No Games Scheduled';
                 board.classList.add('no-game');
                 document.getElementById('inning-info').textContent = '';
                 document.getElementById('outs-info').textContent   = '';
@@ -75,6 +88,9 @@
     setInterval(refreshStatus, 10000);
     document.getElementById('btn-refresh').addEventListener('click', refreshStatus);
 
+    /* ---- Team color map (populated when teams load) ---- */
+    var teamColors = {};
+
     /* ---- Load team list from backend ---- */
     function loadTeams(selectedId) {
         api('/teams').then(function (r) { return r.json(); }).then(function (d) {
@@ -85,6 +101,8 @@
                 return a.name.localeCompare(b.name);
             });
             teams.forEach(function (t) {
+                /* Store colors keyed by team id */
+                teamColors[String(t.id)] = { bg: t.bg, fg: t.fg };
                 var opt = document.createElement('option');
                 opt.value = t.id;
                 opt.textContent = t.name + ' (' + t.abbr + ')';
@@ -92,6 +110,14 @@
                 sel.appendChild(opt);
             });
         }).catch(function () {});
+    }
+
+    /* ---- Apply team colors to color pickers instantly ---- */
+    function applyTeamColors(teamId) {
+        var colors = teamColors[String(teamId)];
+        if (!colors) return;
+        document.getElementById('bg-color').value   = colors.bg;
+        document.getElementById('text-color').value = colors.fg;
     }
 
     /* ---- Load clips ---- */
@@ -134,6 +160,11 @@
 
     document.getElementById('scroll-speed').addEventListener('input', function () {
         document.getElementById('scroll-speed-val').textContent = this.value;
+    });
+
+    /* ---- Team selection instantly updates colors ---- */
+    document.getElementById('team-select').addEventListener('change', function () {
+        applyTeamColors(this.value);
     });
 
     /* ---- Save ---- */
