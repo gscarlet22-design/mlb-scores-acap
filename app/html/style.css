@@ -69,8 +69,8 @@ h1 { font-size: 24px; color: #fff; }
     font-size: 13px; font-weight: 600; color: #c5a028;
     text-transform: uppercase; letter-spacing: 0.06em;
 }
-.inning-info { font-size: 20px; color: #fff; margin-top: 4px; font-weight: 600; }
-.outs-info { font-size: 12px; color: #aac4f0; margin-top: 2px; }
+.inning-info { font-size: 16px; color: #fff; margin-top: 4px; font-weight: 600; white-space: nowrap; }
+.outs-info { font-size: 12px; color: #aac4f0; margin-top: 2px; white-space: nowrap; }
 
 .scoreboard.live { box-shadow: 0 0 0 2px #c5a028; }
 .scoreboard.final { background: #0d1a30; border-color: #1e3a6b; }
