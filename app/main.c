@@ -261,20 +261,18 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     CurlBuf resp_buf = {NULL, 0};
     CURL *dc = curl_easy_init();
 
-    char cred[128];
-    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
-
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
 
     curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
-    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(dc, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(dc, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
     curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
     curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
+    /* No auth — calling from localhost, device may not require it */
 
     CURLcode rc = curl_easy_perform(dc);
     long http_code = -1;
@@ -939,8 +937,8 @@ static void handle_request(int fd) {
         memset(g_app.last_display_msg, 0, sizeof(g_app.last_display_msg));
         char disp_resp[512] = "";
         long http_code = display_show_ex(tmsg, disp_resp, sizeof(disp_resp));
-        char out[640];
-        snprintf(out, sizeof(out), "{\"message\":\"ok\",\"display_http\":%ld,\"display_resp\":\"%s\"}", http_code, disp_resp);
+        char out[768];
+        snprintf(out, sizeof(out), "{\"message\":\"ok\",\"display_http\":%ld,\"display_resp\":\"%s\",\"sent_msg\":\"%s\"}", http_code, disp_resp, tmsg);
         http_respond(fd, 200, "application/json", out);
         return;
     }
