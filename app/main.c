@@ -197,6 +197,25 @@ static void app_log(const char *fmt, ...) {
     va_end(ap);
 }
 
+/* ── JSON string escape helper ──────────────────────────────────── */
+/* Escapes quotes, backslashes, and control chars for safe JSON embedding */
+static void json_escape(const char *src, char *dst, size_t dst_size) {
+    size_t di = 0;
+    for (size_t si = 0; src[si] && di + 2 < dst_size; si++) {
+        unsigned char c = (unsigned char)src[si];
+        if (c == '"' || c == '\\') {
+            if (di + 3 >= dst_size) break;
+            dst[di++] = '\\';
+            dst[di++] = (char)c;
+        } else if (c < 0x20) {
+            /* Skip control characters (newlines, tabs, etc.) */
+        } else {
+            dst[di++] = (char)c;
+        }
+    }
+    dst[di] = '\0';
+}
+
 /* ── HTTP fetch helper ───────────────────────────────────────────── */
 static char *http_get(CURL *curl, const char *url) {
     CurlBuf buf = {NULL, 0};
@@ -739,6 +758,8 @@ static void handle_request(int fd) {
             struct tm *tm = localtime(&g_app.last_poll_time);
             strftime(ts, sizeof(ts), "%H:%M:%S", tm);
         }
+        char safe_last_play[MAX_MSG * 2];
+        json_escape(g_app.last_play, safe_last_play, sizeof(safe_last_play));
         char resp[2048];
         snprintf(resp, sizeof(resp),
             "{\"enabled\":%s,\"game_pk\":%d,"
@@ -761,7 +782,7 @@ static void handle_request(int fd) {
             g_app.opponent_name,
             g_app.game_state,
             g_app.inning_state, g_app.inning, g_app.outs,
-            g_app.last_play,
+            safe_last_play,
             ts,
             g_app.is_live ? "true" : "false",
             g_app.next_game_opponent,
