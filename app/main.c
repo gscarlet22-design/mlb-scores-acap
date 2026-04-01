@@ -261,35 +261,25 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
 
-    /* Pre-authenticate: send a GET to prime curl's digest nonce cache so the
-       subsequent POST goes out with Authorization already set on the first
-       attempt — body is never dropped on a retry. */
-    CURL *dc = curl_easy_init();
-    curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_STOP_API);
-    curl_easy_setopt(dc, CURLOPT_HTTPGET, 1L);
-    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 3L);
-    curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);  /* discard response */
-    CurlBuf discard = {NULL, 0};
-    curl_easy_setopt(dc, CURLOPT_WRITEDATA, &discard);
-    curl_easy_perform(dc);  /* ignore result — just priming auth */
-    free(discard.data);
+    app_log("display_show body: %s", body);
 
-    /* Now POST — curl sends pre-emptive digest auth, body intact on first request */
+    /* Two-step digest: first POST with no auth to get the nonce, then POST again
+       with auth + body. Use CURLOPT_COPYPOSTFIELDS so curl retains the body. */
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "Expect:");
 
     CurlBuf resp_buf = {NULL, 0};
+    CURL *dc = curl_easy_init();
     curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
     curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
     curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
     curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(dc, CURLOPT_UNRESTRICTED_AUTH, 1L);
     curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
-    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 10L);
 
     CURLcode rc = curl_easy_perform(dc);
     long http_code = -1;
