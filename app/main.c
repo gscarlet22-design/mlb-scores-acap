@@ -809,6 +809,7 @@ static void handle_request(int fd) {
             "\"display_text_color\":\"%s\","
             "\"display_bg_color\":\"%s\","
             "\"display_scroll_speed\":\"%d\","
+            "\"display_persist_final\":\"%s\","
             "\"display_duration_ms\":\"%d\","
             "\"device_user\":\"%s\","
             "\"device_pass_set\":%s}",
