@@ -1,37 +1,62 @@
-[README.md](https://github.com/user-attachments/files/26364349/README.md)
-# MLB Live Scores — Axis C1720 ACAP
+# MLB Live Scores — Axis C1720 / C1710 ACAP
 
-Displays live MLB scores on the C1720 speaker display and plays audio clips on
-scoring plays. The followed team is **user-selectable** from a dropdown in the
-web UI — all 30 MLB teams are available. Uses the free MLB StatsAPI — no API
-key required.
+**Version 1.0.2** — gscarlet22 design
+
+Displays live MLB scores on the Axis C1720 or C1710 speaker display and plays
+audio clips on scoring plays. When no game is active, shows the next scheduled
+game with date and local start time. The followed team is user-selectable from
+a dropdown — all 30 MLB teams are available with their official colors
+auto-applied. Uses the free MLB StatsAPI — no API key required.
 
 ---
 
-## How it works
+## Features
 
-| Component | Detail |
-|-----------|--------|
-| **Data source** | `statsapi.mlb.com` — MLB's own free, unofficial public API |
-| **Team selection** | Any of the 30 MLB teams, configurable live from the web UI |
-| **Poll rate** | Every 30 s during a live game, every 5 min otherwise |
-| **Display** | Axis `speaker-display-notification` REST API (built into AXIS OS) |
-| **Audio** | VAPIX `mediaclip.cgi` — separate clips for score change vs. your team scoring |
+| Feature | Detail |
+|---------|--------|
+| **Live scores** | Score, inning, half-inning, and out count on the display during a game |
+| **Next game preview** | When no game is live, shows opponent, date, and local start time (looks 14 days ahead) |
+| **Final score persist** | Keeps the final score on the display until midnight after a game ends |
+| **All 30 teams** | User-selectable from a dropdown in the web UI — change takes effect immediately with no restart |
+| **Team colors** | Selecting a team auto-fills the display background and text with that team's official colors |
+| **Dual audio clips** | Separate audio clips for any score change vs. your team specifically scoring |
+| **Data source** | `statsapi.mlb.com` — MLB's own free, unofficial public API, no key needed |
+| **Compatible devices** | Axis C1720 and C1710 (both aarch64 / ARTPEC-8) |
 | **HTTP port** | `2016` (internal, proxied via AXIS OS reverse proxy) |
 
-Score line shown on display during a live game:
+---
 
+## What the display shows
+
+During a live game:
 ```
 Royals 4 - Cardinals 2 | Bottom 7 | 1 out
 ```
 
-Final result:
-
+Final result (persists until midnight if enabled):
 ```
 FINAL: Royals WIN 6 - Cardinals 3
 ```
 
-Switching teams in the UI resets the game lookup immediately — no restart needed.
+No game today — next game found:
+```
+Next Game  |  vs Cardinals  |  Apr 3, 7:10 PM
+```
+
+No game today and nothing scheduled within 14 days:
+```
+No Games Scheduled
+```
+
+---
+
+## Internet requirement
+
+The C1720/C1710 needs outbound internet access to reach `statsapi.mlb.com`
+on port 443. All display and audio calls happen locally on the device's
+internal network. The app coexists with AXIS Audio Manager Pro without
+conflict — PA announcements will take priority over score display, which
+is the correct behavior.
 
 ---
 
@@ -40,10 +65,15 @@ Switching teams in the UI resets the game lookup immediately — no restart need
 | Tool | Version | Notes |
 |------|---------|-------|
 | Docker Desktop or Engine | 4.11+ / 20.10+ | Required on your build machine |
-| AXIS OS on C1720 | 12.x recommended | Must match SDK version below |
+| AXIS OS on device | 12.x recommended | Must match SDK version below |
 
 > **Apple Silicon (M1/M2/M3) Mac?**
 > Add `--platform=linux/amd64` to every `docker` command below.
+
+> **No Docker available (e.g. work laptop)?**
+> Use GitHub Actions — see the `.github/workflows/build.yml` included in
+> this repo. Push your changes to `main` and the `.eap` is produced as a
+> downloadable artifact automatically.
 
 ---
 
@@ -51,58 +81,98 @@ Switching teams in the UI resets the game lookup immediately — no restart need
 
 ```
 mlb_scores/
-├── Dockerfile
+├── .github/workflows/build.yml   ← GitHub Actions build (no Docker needed)
+├── Dockerfile                    ← SDK build container
 └── app/
-    ├── main.c
-    ├── Makefile
-    ├── manifest.json
+    ├── main.c                    ← Main application (C, single file)
+    ├── Makefile                  ← Build rules
+    ├── manifest.json             ← ACAP package metadata
+    ├── LICENSE
     └── html/
-        ├── index.html
-        ├── app.js
-        └── style.css
+        ├── index.html            ← Web UI
+        ├── app.js                ← UI logic
+        └── style.css             ← Styling
 ```
 
 ---
 
-## Step 1 — Build the .eap file
+## Building
 
-Open a terminal in the `mlb_scores/` directory.
+### Option A — GitHub Actions (no local Docker needed)
+
+Push to the `main` branch. GitHub Actions pulls the Axis SDK, compiles, and
+produces the `.eap` as a downloadable artifact under the **Actions** tab.
+Trigger a manual build anytime with **Actions → Build MLB Scores ACAP →
+Run workflow**.
+
+### Option B — Local Docker
 
 ```bash
-docker build --build-arg ARCH=aarch64 --tag mlb_scores:1.0 .
+# From the mlb_scores/ directory
+docker build --build-arg ARCH=aarch64 --tag mlb_scores:1.0.2 .
+docker cp $(docker create mlb_scores:1.0.2):/opt/app ./build
 ```
 
-Extract the `.eap` file:
-
-```bash
-docker cp $(docker create mlb_scores:1.0):/opt/app ./build
-```
-
-Your deployable file: `build/mlb_scores_1_0_0_aarch64.eap`
+Your deployable file: `build/mlb_scores_1_0_2_aarch64.eap`
 
 ---
 
-## Step 2 — Install on the C1720
+## Installing on the device
 
-Via the web interface: **Apps → Add app** → upload the `.eap`.
+**Via the web interface (easiest):**
 
-Via VAPIX:
+1. Open `http://<device-ip>` in a browser
+2. Go to **Apps → Add app**
+3. Upload `mlb_scores_1_0_2_aarch64.eap`
+4. The app installs and starts automatically
+
+Installing a newer version over an existing one works in-place — no need
+to uninstall first, as long as the version number is higher.
+
+**Via VAPIX (scripted):**
 
 ```bash
 curl -u root:<password> \
-     -F packfil=@build/mlb_scores_1_0_0_aarch64.eap \
-     "http://<camera-ip>/axis-cgi/applications/upload.cgi"
+     -F packfil=@build/mlb_scores_1_0_2_aarch64.eap \
+     "http://<device-ip>/axis-cgi/applications/upload.cgi"
 ```
 
 ---
 
-## Step 3 — Configure
+## Configuring
 
-1. **Apps → MLB Live Scores → Open**
-2. Config tab: pick your **team** from the dropdown, enter device credentials, choose audio clips, set display options
-3. **Save Settings** → **Test Display** to verify
+1. Go to **Apps → MLB Live Scores → Open**
+2. On the **Config** tab:
 
-Changing the team takes effect on the next poll with no restart.
+**Team**
+- Pick any of the 30 MLB teams from the dropdown
+- The display background and text colors auto-fill with that team's official colors instantly
+- Colors can be manually adjusted after auto-fill
+
+**Device Credentials**
+- Enter the device username and password — required for VAPIX display and audio calls
+
+**Polling**
+- Live game poll interval: 15 / 30 / 60 / 120 seconds (default 30 s)
+- Between games the app polls every 5 minutes automatically
+- Enabled toggle — disable the app without uninstalling
+
+**Display**
+- Show on Display toggle
+- Text size: Small / Medium / Large
+- Text color and background color (auto-filled from team colors, adjustable)
+- Scroll speed (1–5)
+- Duration in seconds
+- Persist Final Score — keeps the final score on the display until midnight
+
+**Audio**
+- Notification Sound — plays on any score change
+- Scoring Sound — plays specifically when your team scores
+- Test Sound button
+
+3. Click **Save Settings**
+4. Click **Test Display** to confirm the display is working
+5. Switch to the **Status** tab to monitor live
 
 ---
 
@@ -130,9 +200,7 @@ Changing the team takes effect on the next poll with no restart.
 
 ## Adjusting the SDK version
 
-```bash
-docker build --build-arg ARCH=aarch64 --build-arg VERSION=12.6.0 --tag mlb_scores:1.0 .
-```
+Match the SDK version to your device's AXIS OS firmware:
 
 | AXIS OS | SDK version |
 |---------|-------------|
@@ -140,7 +208,11 @@ docker build --build-arg ARCH=aarch64 --build-arg VERSION=12.6.0 --tag mlb_score
 | 12.6.x  | 12.6.0 |
 | 12.5.x  | 12.5.0 |
 
-Check firmware at `http://<camera-ip>` → **System → About**.
+```bash
+docker build --build-arg ARCH=aarch64 --build-arg VERSION=12.6.0 --tag mlb_scores:1.0.2 .
+```
+
+Check your firmware at `http://<device-ip>` → **System → About**.
 
 ---
 
@@ -148,15 +220,27 @@ Check firmware at `http://<camera-ip>` → **System → About**.
 
 | Symptom | Fix |
 |---------|-----|
-| Display does nothing | Re-enter device password in Config tab |
-| No score / team dropdown empty | Check Status tab for last poll time; wait for app to start |
-| App shows "Disabled" | Enable in Config tab |
+| Display does nothing | Re-enter device password in Config tab, then Test Display |
+| Score not updating | Check Status tab — Last Poll time shows if API is reachable |
+| Next game not showing | Device may not have internet access, or no games in next 14 days |
+| Team dropdown empty | Wait a few seconds and refresh — app may still be starting |
+| App shows "Disabled" | Enable toggle in Config tab |
+| Colors not auto-filling | Select a team from the dropdown while on the Config tab |
 | Build fails: package not found | Adjust `VERSION` build arg to match your firmware |
-| Apple Silicon warning | Add `--platform=linux/amd64` |
+| Apple Silicon Docker warning | Add `--platform=linux/amd64` |
 
-View live logs:
+**View live logs on the device:**
 
 ```bash
-ssh root@<camera-ip>
+ssh root@<device-ip>
 journalctl -u mlb_scores -f
 ```
+
+---
+
+## Version history
+
+| Version | Changes |
+|---------|---------|
+| 1.0.2 | Team colors auto-fill on selection; next game preview (14-day lookahead); persist final score until midnight |
+| 1.0.0 | Initial release — live scores, all 30 teams selectable, dual audio clips |
