@@ -324,7 +324,7 @@ static long raw_http_post_digest(const char *host, int port, const char *path,
         return -1;
     }
     size_t blen = strlen(body);
-    char req1[2048];
+    char req1[8192];
     int r1len = snprintf(req1, sizeof(req1),
         "POST %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -381,7 +381,7 @@ static long raw_http_post_digest(const char *host, int port, const char *path,
         if (resp_out) snprintf(resp_out, resp_sz, "connect2 failed");
         return -1;
     }
-    char req2[2048];
+    char req2[8192];
     int r2len = snprintf(req2, sizeof(req2),
         "POST %s HTTP/1.1\r\n"
         "Host: %s\r\n"
