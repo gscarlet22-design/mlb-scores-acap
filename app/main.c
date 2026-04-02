@@ -418,11 +418,23 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
     if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
 
-    /* Minimal body — just text and duration to verify API field names */
+    /* Correct Axis speaker display notification API schema */
     char body[1024];
     snprintf(body, sizeof(body),
-        "{\"text\":\"%s\",\"duration\":%d}",
+        "{\"data\":{"
+        "\"message\":\"%s\","
+        "\"textColor\":\"%s\","
+        "\"backgroundColor\":\"%s\","
+        "\"textSize\":\"%s\","
+        "\"scrollSpeed\":%d,"
+        "\"scrollDirection\":\"fromRightToLeft\","
+        "\"duration\":{\"type\":\"time\",\"value\":%d}"
+        "}}",
         message,
+        g_app.display_text_color,
+        g_app.display_bg_color,
+        g_app.display_text_size,
+        g_app.display_scroll_speed,
         g_app.display_duration_ms);
 
     app_log("display body: %s", body);
