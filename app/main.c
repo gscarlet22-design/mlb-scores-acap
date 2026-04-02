@@ -467,13 +467,23 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(dc);
 
+    char *effective_url = NULL;
+    curl_easy_getinfo(dc, CURLINFO_EFFECTIVE_URL, &effective_url);
+
     if (rc != CURLE_OK) {
         app_log("display curl error: %s", curl_easy_strerror(rc));
-        if (resp_out) snprintf(resp_out, resp_sz, "curl_error=%s", curl_easy_strerror(rc));
+        if (resp_out) snprintf(resp_out, resp_sz,
+            "curl_error=%s sent_body=%s", curl_easy_strerror(rc), body);
     } else {
-        app_log("display http=%ld body=%s", http_code, resp_buf.data ? resp_buf.data : "(empty)");
-        if (resp_out) snprintf(resp_out, resp_sz, "http=%ld body=%s",
-                               http_code, resp_buf.data ? resp_buf.data : "(empty)");
+        app_log("display http=%ld effective_url=%s body=%s", http_code,
+                effective_url ? effective_url : "?",
+                resp_buf.data ? resp_buf.data : "(empty)");
+        if (resp_out) snprintf(resp_out, resp_sz,
+            "http=%ld effective_url=%s sent_body=%s api_resp=%s",
+            http_code,
+            effective_url ? effective_url : "?",
+            body,
+            resp_buf.data ? resp_buf.data : "(empty)");
     }
     free(resp_buf.data);
     return (rc == CURLE_OK) ? http_code : -1;
