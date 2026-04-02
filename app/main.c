@@ -33,8 +33,8 @@
 #define MLB_API_BASE        "https://statsapi.mlb.com/api/v1"
 #define MLB_API_LIVE        "https://statsapi.mlb.com/api/v1.1"
 
-#define DISPLAY_API         "http://127.0.0.1/config/rest/speaker-display-notification/v1/simple"
-#define DISPLAY_STOP_API    "http://127.0.0.1/config/rest/speaker-display-notification/v1/stop"
+#define DISPLAY_API         "https://127.0.0.1/config/rest/speaker-display-notification/v1/simple"
+#define DISPLAY_STOP_API    "https://127.0.0.1/config/rest/speaker-display-notification/v1/stop"
 #define MEDIACLIP_API       "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=play&clip=%d"
 #define PARAM_API           "http://127.0.0.1/axis-cgi/param.cgi?action=update&"
 
@@ -435,11 +435,48 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
 
     app_log("display body: %s", body);
 
-    return raw_http_post_digest(
-        "127.0.0.1", 80,
-        "/config/rest/speaker-display-notification/v1/simple",
-        body, g_app.device_user, g_app.device_pass,
-        resp_out, resp_sz);
+    /* Use HTTPS + basic auth: sends credentials and body in a single request,
+       no digest retry, body never dropped. SSL verify disabled for localhost. */
+    CURL *dc = curl_easy_init();
+    if (!dc) {
+        if (resp_out) snprintf(resp_out, resp_sz, "curl_easy_init failed");
+        return -1;
+    }
+
+    char cred[128];
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    struct curl_slist *hdrs = NULL;
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+
+    CurlBuf resp_buf = {NULL, 0};
+    curl_easy_setopt(dc, CURLOPT_URL, DISPLAY_API);
+    curl_easy_setopt(dc, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(dc, CURLOPT_COPYPOSTFIELDS, body);
+    curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
+    curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+    curl_easy_setopt(dc, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(dc, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(dc, CURLOPT_WRITEDATA, &resp_buf);
+    curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
+
+    CURLcode rc = curl_easy_perform(dc);
+    long http_code = -1;
+    curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(dc);
+
+    if (rc != CURLE_OK) {
+        app_log("display curl error: %s", curl_easy_strerror(rc));
+        if (resp_out) snprintf(resp_out, resp_sz, "curl_error=%s", curl_easy_strerror(rc));
+    } else {
+        app_log("display http=%ld body=%s", http_code, resp_buf.data ? resp_buf.data : "(empty)");
+        if (resp_out) snprintf(resp_out, resp_sz, "http=%ld body=%s",
+                               http_code, resp_buf.data ? resp_buf.data : "(empty)");
+    }
+    free(resp_buf.data);
+    return (rc == CURLE_OK) ? http_code : -1;
 }
 
 static void display_show(const char *message) {
