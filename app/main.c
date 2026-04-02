@@ -1156,7 +1156,7 @@ static void handle_request(int fd) {
             char *line = strtok(raw, "\n");
             while (line) {
                 int idx; char name[128];
-                if (sscanf(line, "root.MediaClip.C%d.Name=%127[^\r\n]", &idx, name) == 2) {
+                if (sscanf(line, "root.MediaClip.M%d.Name=%127[^\r\n]", &idx, name) == 2) {
                     cJSON *clip = cJSON_CreateObject();
                     cJSON_AddNumberToObject(clip, "id",   idx);
                     cJSON_AddStringToObject(clip, "name", name);
