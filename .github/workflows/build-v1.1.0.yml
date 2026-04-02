@@ -1,1 +1,30 @@
+name: Build MLB Scores ACAP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'v1.1.0/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ACAP
+        run: |
+          cd v1.1.0
+          docker build --build-arg ARCH=aarch64 --tag mlb_scores:1.1.0 .
+          id=$(docker create mlb_scores:1.1.0)
+          docker cp $id:/opt/app ./build
+          docker rm $id
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb_scores_1_1_0_aarch64
+          path: v1.1.0/build/*.eap
 
