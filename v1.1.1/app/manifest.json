@@ -1,0 +1,80 @@
+{
+    "schemaVersion": "1.9.0",
+    "acapPackageConf": {
+        "setup": {
+            "appName": "mlb_scores",
+            "friendlyName": "MLB Live Scores",
+            "vendor": "gscarlet22 design",
+            "embeddedSdkVersion": "3.0",
+            "runMode": "respawn",
+            "version": "1.1.1",
+            "user": {
+                "username": "sdk",
+                "group": "sdk"
+            },
+            "architecture": "aarch64"
+        },
+        "configuration": {
+            "settingPage": "index.html",
+            "reverseProxy": [
+                {
+                    "apiPath": "api",
+                    "target": "http://127.0.0.1:2016",
+                    "access": "admin"
+                }
+            ],
+            "paramConfig": [
+                {
+                    "name": "Teams",
+                    "default": "",
+                    "type": "String"
+                },
+                {
+                    "name": "Enabled",
+                    "default": "true",
+                    "type": "String"
+                },
+                {
+                    "name": "PollIntervalSec",
+                    "default": "30",
+                    "type": "String"
+                },
+                {
+                    "name": "DisplayEnabled",
+                    "default": "true",
+                    "type": "String"
+                },
+                {
+                    "name": "DisplayPersistFinal",
+                    "default": "true",
+                    "type": "String"
+                },
+                {
+                    "name": "DeviceUser",
+                    "default": "root",
+                    "type": "String"
+                },
+                {
+                    "name": "DevicePass",
+                    "default": "",
+                    "type": "String"
+                },
+                {
+                    "name": "TeamId",
+                    "default": "118",
+                    "type": "String"
+                },
+                {
+                    "name": "NotificationClipId",
+                    "default": "38",
+                    "type": "String"
+                },
+                {
+                    "name": "ScoreClipId",
+                    "default": "38",
+                    "type": "String"
+                }
+            ]
+        }
+    }
+}
