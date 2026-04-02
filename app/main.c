@@ -418,20 +418,12 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
     if (strcmp(g_app.display_text_size, "small") == 0)  font_size = 18;
     if (strcmp(g_app.display_text_size, "large") == 0)  font_size = 32;
 
+    /* Minimal body — just text and duration to verify API field names */
     char body[1024];
     snprintf(body, sizeof(body),
-        "{\"text\":\"%s\","
-        "\"duration\":%d,"
-        "\"textColor\":\"%s\","
-        "\"backgroundColor\":\"%s\","
-        "\"fontSize\":%d,"
-        "\"scrollSpeed\":%d}",
+        "{\"text\":\"%s\",\"duration\":%d}",
         message,
-        g_app.display_duration_ms,
-        g_app.display_text_color,
-        g_app.display_bg_color,
-        font_size,
-        g_app.display_scroll_speed);
+        g_app.display_duration_ms);
 
     app_log("display body: %s", body);
 
@@ -463,12 +455,11 @@ static long display_show_ex(const char *message, char *resp_out, size_t resp_sz)
 
     CURLcode rc = curl_easy_perform(dc);
     long http_code = -1;
+    char *effective_url = NULL;
     curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_getinfo(dc, CURLINFO_EFFECTIVE_URL, &effective_url);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(dc);
-
-    char *effective_url = NULL;
-    curl_easy_getinfo(dc, CURLINFO_EFFECTIVE_URL, &effective_url);
 
     if (rc != CURLE_OK) {
         app_log("display curl error: %s", curl_easy_strerror(rc));
