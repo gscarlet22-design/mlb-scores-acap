@@ -155,6 +155,10 @@ typedef struct {
     char next_game_date[32];
     char next_game_time[32];
     int  next_game_home;
+
+    /* set to the game_pk of the last completed game so we don't re-detect
+       the same Final game when display_persist_final is off */
+    int  last_completed_game_pk;
 } TeamState;
 
 /* ── Global app state ───────────────────────────────────────────── */
@@ -363,17 +367,80 @@ static long display_show_ex(const char *message, const TeamConfig *cfg,
     return (rc == CURLE_OK) ? http_code : -1;
 }
 
+/* ── Audio Device Control: set output gain (dB) ─────────────────── */
+/* Gain range on C1720 internal output: -95 dB (mute) to 0 dB (max).
+   This call is synchronous — caller spawns a restore thread as needed. */
+static void set_output_gain(int gain_db) {
+    if (gain_db > 0)   gain_db = 0;
+    if (gain_db < -95) gain_db = -95;
+
+    char cred[128];
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    char body[384];
+    snprintf(body, sizeof(body),
+        "{\"apiVersion\":\"1.0\",\"method\":\"setDevicesSettings\","
+        "\"params\":{\"devices\":[{\"id\":\"0\",\"outputs\":[{\"id\":\"0\","
+        "\"connectionType\":{\"id\":\"internal\","
+        "\"signalingType\":{\"id\":\"unbalanced\",\"gain\":%d}}}]}]}}",
+        gain_db);
+
+    CURL *c = curl_easy_init();
+    if (!c) return;
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    CurlBuf buf = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
+    curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS,    body);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,       5L);
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdrs);
+    app_log("set_output_gain db=%d http=%ld rc=%d resp=%s",
+            gain_db, http_code, rc, buf.data ? buf.data : "(none)");
+    free(buf.data);
+}
+
+/* Detached thread: sleep delay_sec then restore gain to 0 dB (max).
+   Ensures emergency announcements return to full volume after a clip. */
+typedef struct { int delay_sec; } RestoreGainArg;
+static void *restore_gain_thread(void *arg) {
+    RestoreGainArg *ra = arg;
+    sleep((unsigned int)ra->delay_sec);
+    free(ra);
+    set_output_gain(0);   /* restore to max */
+    return NULL;
+}
+
+#define CLIP_RESTORE_SEC 20   /* seconds before gain is restored to 0 dB */
+
 /* ── VAPIX audio clip playback ───────────────────────────────────── */
 static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
-    /* Volume is passed per-clip via playclip.cgi so the device system level is never touched.
-       VAPIX volume range is 0–1000 (100 = default/100%). Our slider is 0–100, so multiply ×10. */
-    int vol = g_app.audio_volume;   /* int read — safe without lock on aarch64 */
+    /* Map 0-100% slider to -95..0 dB: 0% → -95 dB, 100% → 0 dB (linear in dB). */
+    int vol = g_app.audio_volume;
     if (vol < 0) vol = 0; if (vol > 100) vol = 100;
-    int vapix_vol = vol * 10;
+    int gain_db = -95 + (vol * 95 / 100);
+    set_output_gain(gain_db);
+
+    /* Spawn a detached thread to restore gain to 0 dB after the clip finishes */
+    RestoreGainArg *ra = malloc(sizeof(RestoreGainArg));
+    if (ra) {
+        ra->delay_sec = CLIP_RESTORE_SEC;
+        pthread_t t;
+        if (pthread_create(&t, NULL, restore_gain_thread, ra) == 0)
+            pthread_detach(t);
+        else
+            free(ra);
+    }
+
     char url[MAX_URL];
-    snprintf(url, sizeof(url),
-             "http://127.0.0.1/axis-cgi/playclip.cgi?clip=%d&volume=%d",
-             clip_id, vapix_vol);
+    snprintf(url, sizeof(url), MEDIACLIP_API, clip_id);
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -903,7 +970,13 @@ static void poll_one_team(int idx) {
                              now_tm.tm_year != final_tm_s.tm_year);
         if (past_midnight || !g_app.display_persist_final) {
             app_log("[%s] final: resetting after midnight / persist disabled", state->team_name);
+            int completed_pk = state->current_game_pk;
             reset_team_state(idx);
+            if (!past_midnight) {
+                /* Same calendar day — remember this game so we don't re-detect it as
+                   newly_final on the next poll when fetch_game_pk_for_team finds it again */
+                state->last_completed_game_pk = completed_pk;
+            }
         } else {
             /* Show final score again (display expired after duration_ms) */
             if (g_app.display_enabled) {
@@ -919,6 +992,11 @@ static void poll_one_team(int idx) {
     /* ── Find today's game if we don't have one ── */
     if (state->current_game_pk == 0) {
         int pk = fetch_game_pk_for_team(g_app.fetch_curl, idx);
+        if (pk != 0 && pk == state->last_completed_game_pk) {
+            /* This game already completed today and persist is off — skip it */
+            app_log("[%s] skipping already-completed game pk=%d", state->team_name, pk);
+            pk = 0;
+        }
         if (pk == 0) {
             state->next_game_opponent[0] = '\0';
             fetch_next_game_for_team(g_app.fetch_curl, idx);
@@ -1373,14 +1451,41 @@ static void handle_request(int fd) {
         strncpy(pass, g_app.device_pass, sizeof(pass)-1);
         pthread_mutex_unlock(&g_app.lock);
 
-        /* Build the example clip URL showing playclip.cgi with VAPIX 0-1000 scale */
+        /* Map slider to dB (same formula as play_clip_ex) */
+        int gain_db = -95 + (cur_vol * 95 / 100);
+
         char example_url[MAX_URL];
         snprintf(example_url, sizeof(example_url),
-            "http://127.0.0.1/axis-cgi/playclip.cgi?clip=%d&volume=%d",
-            ex_clip_id, cur_vol * 10);
+            MEDIACLIP_API " — gain set to %d dB via audiodevicecontrol.cgi before play",
+            ex_clip_id, gain_db);
 
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", user, pass);
+
+        /* Test: actually call setDevicesSettings with the current gain */
+        char set_body[384];
+        snprintf(set_body, sizeof(set_body),
+            "{\"apiVersion\":\"1.0\",\"method\":\"setDevicesSettings\","
+            "\"params\":{\"devices\":[{\"id\":\"0\",\"outputs\":[{\"id\":\"0\","
+            "\"connectionType\":{\"id\":\"internal\","
+            "\"signalingType\":{\"id\":\"unbalanced\",\"gain\":%d}}}]}]}}",
+            gain_db);
+        CURL *sc = curl_easy_init();
+        CurlBuf set_buf = {NULL, 0};
+        struct curl_slist *s_hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+        curl_easy_setopt(sc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
+        curl_easy_setopt(sc, CURLOPT_USERPWD,       cred);
+        curl_easy_setopt(sc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+        curl_easy_setopt(sc, CURLOPT_HTTPHEADER,    s_hdrs);
+        curl_easy_setopt(sc, CURLOPT_POSTFIELDS,    set_body);
+        curl_easy_setopt(sc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(sc, CURLOPT_WRITEDATA,     &set_buf);
+        curl_easy_setopt(sc, CURLOPT_TIMEOUT,       5L);
+        CURLcode set_rc = curl_easy_perform(sc);
+        long set_http = -1;
+        curl_easy_getinfo(sc, CURLINFO_RESPONSE_CODE, &set_http);
+        curl_easy_cleanup(sc);
+        curl_slist_free_all(s_hdrs);
 
         /* Query audiodevicecontrol.cgi for device gain capabilities */
         const char *adc_body = "{\"apiVersion\":\"1.0\",\"method\":\"getDevicesCapabilities\"}";
@@ -1420,17 +1525,21 @@ static void handle_request(int fd) {
 
         cJSON *diag = cJSON_CreateObject();
         cJSON_AddNumberToObject(diag, "audio_volume_setting",  cur_vol);
-        cJSON_AddNumberToObject(diag, "vapix_volume",          cur_vol * 10);
-        cJSON_AddStringToObject(diag, "clip_play_url_example", example_url);
-        cJSON_AddNumberToObject(diag, "adc_http_code",  (double)adc_http);
-        cJSON_AddNumberToObject(diag, "adc_curl_code",  (double)adc_rc);
-        cJSON_AddStringToObject(diag, "adc_response",
+        cJSON_AddNumberToObject(diag, "gain_db_applied",       gain_db);
+        cJSON_AddStringToObject(diag, "note",
+            "gain set before each clip via audiodevicecontrol.cgi; restored to 0 dB after ~20s");
+        cJSON_AddNumberToObject(diag, "set_gain_http_code",    (double)set_http);
+        cJSON_AddNumberToObject(diag, "set_gain_curl_code",    (double)set_rc);
+        cJSON_AddStringToObject(diag, "set_gain_response",
+            set_buf.data ? set_buf.data : "(no response)");
+        cJSON_AddNumberToObject(diag, "capabilities_http",  (double)adc_http);
+        cJSON_AddStringToObject(diag, "capabilities",
             adc_buf.data ? adc_buf.data : "(no response)");
         cJSON_AddNumberToObject(diag, "list_http_code",  (double)list_http);
-        cJSON_AddNumberToObject(diag, "list_curl_code",  (double)list_rc);
         cJSON_AddStringToObject(diag, "audio_params",
             list_buf.data ? list_buf.data : "(no response)");
 
+        free(set_buf.data);
         free(adc_buf.data);
         free(list_buf.data);
 
