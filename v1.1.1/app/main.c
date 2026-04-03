@@ -410,7 +410,7 @@ static void set_audio_volume(int vol) {
 
     char url[MAX_URL];
     snprintf(url, sizeof(url),
-             "http://127.0.0.1/axis-cgi/param.cgi?action=update&AudioOutput.A0.Volume=%d", vol);
+             "http://127.0.0.1/axis-cgi/param.cgi?action=update&root.AudioOutput.A0.Volume=%d", vol);
 
     CURL *c = curl_easy_init();
     if (!c) return;
