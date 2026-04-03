@@ -365,8 +365,13 @@ static long display_show_ex(const char *message, const TeamConfig *cfg,
 
 /* ── VAPIX audio clip playback ───────────────────────────────────── */
 static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
+    /* Volume is passed per-clip via the URL so the device system level is never touched */
+    int vol = g_app.audio_volume;   /* int read — safe without lock on aarch64 */
+    if (vol < 0) vol = 0; if (vol > 100) vol = 100;
     char url[MAX_URL];
-    snprintf(url, sizeof(url), MEDIACLIP_API, clip_id);
+    snprintf(url, sizeof(url),
+             "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=play&clip=%d&volume=%d",
+             clip_id, vol);
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -403,39 +408,6 @@ static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
 }
 
 static void play_clip(int clip_id) { play_clip_ex(clip_id, NULL, 0); }
-
-/* ── VAPIX audio volume ───────────────────────────────────────────── */
-static void set_audio_volume(int vol) {
-    if (vol < 0)   vol = 0;
-    if (vol > 100) vol = 100;
-
-    char url[MAX_URL];
-    snprintf(url, sizeof(url),
-             "http://127.0.0.1/axis-cgi/param.cgi?action=update&root.AudioOutput.A0.Volume=%d", vol);
-
-    CURL *c = curl_easy_init();
-    if (!c) return;
-
-    char cred[128];
-    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
-
-    CurlBuf buf = {NULL, 0};
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
-
-    CURLcode rc = curl_easy_perform(c);
-    long http_code = -1;
-    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(c);
-
-    app_log("set_audio_volume vol=%d http=%ld rc=%d body=%s",
-            vol, http_code, rc, buf.data ? buf.data : "(empty)");
-    free(buf.data);
-}
 
 /* ── Date helpers ────────────────────────────────────────────────── */
 static void today_str(char *buf, size_t n) {
@@ -1243,10 +1215,8 @@ static void handle_request(int fd) {
                 teams_to_json(tmp, sizeof(tmp));
                 AXSET("Teams", tmp);
             }
-            int vol_to_apply = g_app.audio_volume;
             pthread_mutex_unlock(&g_app.lock);
             cJSON_Delete(j);
-            set_audio_volume(vol_to_apply);
         }
         http_respond(fd, 200, "application/json", "{\"message\":\"Saved\"}");
         return;
@@ -1307,28 +1277,29 @@ static void handle_request(int fd) {
             clip_id = g_app.teams[0].notify_clip_id;
         pthread_mutex_unlock(&g_app.lock);
 
-        int vol = 75;
-        pthread_mutex_lock(&g_app.lock);
-        vol = g_app.audio_volume;
-        pthread_mutex_unlock(&g_app.lock);
-        set_audio_volume(vol);
-
+        /* Volume is baked into the play URL inside play_clip_ex — no device-level change */
         char clip_resp[512] = "";
         long clip_http = play_clip_ex(clip_id, clip_resp, sizeof(clip_resp));
         char out[700];
         snprintf(out, sizeof(out),
-            "{\"message\":\"ok\",\"clip_id\":%d,\"clip_http\":%ld,\"volume_applied\":%d,\"clip_resp\":\"%s\"}",
-            clip_id, clip_http, vol, clip_resp);
+            "{\"message\":\"ok\",\"clip_id\":%d,\"clip_http\":%ld,\"volume\":%d,\"clip_resp\":\"%s\"}",
+            clip_id, clip_http, g_app.audio_volume, clip_resp);
         http_respond(fd, 200, "application/json", out);
         return;
     }
 
-    /* ── GET /volume_diag ── */
-    /* Returns current volume setting, VAPIX set result, and full audio param list
-       to help diagnose volume control issues. */
-    if (strcmp(method, "GET") == 0 && ROUTE("/volume_diag")) {
+    /* ── POST /upload_clips ── */
+    /* Uploads the bundled default audio clips to the device via mediaclip.cgi.
+       Files live at /usr/local/packages/<appname>/audio/ after ACAP install. */
+    if (strcmp(method, "POST") == 0 && ROUTE("/upload_clips")) {
+        #define INSTALL_DIR "/usr/local/packages/" APP_NAME "/"
+        static const struct { const char *file; const char *name; } BUNDLED[] = {
+            { INSTALL_DIR "audio/hit_a_run.mp3",           "Hit a Run!"          },
+            { INSTALL_DIR "audio/inning_change_organ.mp3", "Inning Change Organ" },
+        };
+        int nb = (int)(sizeof(BUNDLED) / sizeof(BUNDLED[0]));
+
         pthread_mutex_lock(&g_app.lock);
-        int cur_vol = g_app.audio_volume;
         char user[64], pass[64];
         strncpy(user, g_app.device_user, sizeof(user)-1);
         strncpy(pass, g_app.device_pass, sizeof(pass)-1);
@@ -1337,25 +1308,78 @@ static void handle_request(int fd) {
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", user, pass);
 
-        /* 1. Try to set the current volume and capture the raw response */
-        char set_url[MAX_URL];
-        snprintf(set_url, sizeof(set_url),
-            "http://127.0.0.1/axis-cgi/param.cgi?action=update&root.AudioOutput.A0.Volume=%d",
-            cur_vol);
-        CURL *dc = curl_easy_init();
-        CurlBuf set_buf = {NULL, 0};
-        curl_easy_setopt(dc, CURLOPT_URL, set_url);
-        curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
-        curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-        curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(dc, CURLOPT_WRITEDATA, &set_buf);
-        curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
-        CURLcode set_rc = curl_easy_perform(dc);
-        long set_http = -1;
-        curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &set_http);
-        curl_easy_cleanup(dc);
+        cJSON *clips_out = cJSON_CreateArray();
+        for (int ci = 0; ci < nb; ci++) {
+            CURL *uc = curl_easy_init();
+            struct curl_httppost *form = NULL, *last = NULL;
+            curl_formadd(&form, &last,
+                CURLFORM_COPYNAME,    "clip",
+                CURLFORM_FILE,        BUNDLED[ci].file,
+                CURLFORM_CONTENTTYPE, "audio/mpeg",
+                CURLFORM_END);
+            curl_formadd(&form, &last,
+                CURLFORM_COPYNAME,     "name",
+                CURLFORM_COPYCONTENTS, BUNDLED[ci].name,
+                CURLFORM_END);
 
-        /* 2. List all root.Audio params to discover what's available */
+            CurlBuf resp = {NULL, 0};
+            curl_easy_setopt(uc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=upload");
+            curl_easy_setopt(uc, CURLOPT_USERPWD,       cred);
+            curl_easy_setopt(uc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+            curl_easy_setopt(uc, CURLOPT_HTTPPOST,      form);
+            curl_easy_setopt(uc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            curl_easy_setopt(uc, CURLOPT_WRITEDATA,     &resp);
+            curl_easy_setopt(uc, CURLOPT_TIMEOUT,       30L);
+
+            CURLcode rc = curl_easy_perform(uc);
+            long http_code = -1;
+            curl_easy_getinfo(uc, CURLINFO_RESPONSE_CODE, &http_code);
+            curl_easy_cleanup(uc);
+            curl_formfree(form);
+
+            app_log("upload_clips: %s http=%ld rc=%d resp=%s",
+                    BUNDLED[ci].name, http_code, rc,
+                    resp.data ? resp.data : "(none)");
+
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "name",      BUNDLED[ci].name);
+            cJSON_AddNumberToObject(r, "http_code", (double)http_code);
+            cJSON_AddNumberToObject(r, "curl_code", (double)rc);
+            cJSON_AddStringToObject(r, "response",  resp.data ? resp.data : "(none)");
+            cJSON_AddItemToArray(clips_out, r);
+            free(resp.data);
+        }
+        #undef INSTALL_DIR
+
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddItemToObject(root, "clips", clips_out);
+        char *out_str = cJSON_PrintUnformatted(root);
+        http_respond(fd, 200, "application/json", out_str ? out_str : "{}");
+        free(out_str);
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* ── GET /volume_diag ── */
+    /* Shows the clip play URL format (volume baked in) and device audio params. */
+    if (strcmp(method, "GET") == 0 && ROUTE("/volume_diag")) {
+        pthread_mutex_lock(&g_app.lock);
+        int cur_vol    = g_app.audio_volume;
+        int ex_clip_id = (g_app.num_teams > 0) ? g_app.teams[0].notify_clip_id : 38;
+        char user[64], pass[64];
+        strncpy(user, g_app.device_user, sizeof(user)-1);
+        strncpy(pass, g_app.device_pass, sizeof(pass)-1);
+        pthread_mutex_unlock(&g_app.lock);
+
+        /* Build the example clip URL to show what would actually be sent */
+        char example_url[MAX_URL];
+        snprintf(example_url, sizeof(example_url),
+            "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=play&clip=%d&volume=%d",
+            ex_clip_id, cur_vol);
+
+        /* List root.Audio params for reference */
+        char cred[128];
+        snprintf(cred, sizeof(cred), "%s:%s", user, pass);
         char list_url[MAX_URL];
         snprintf(list_url, sizeof(list_url),
             "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.Audio");
@@ -1374,17 +1398,12 @@ static void handle_request(int fd) {
 
         cJSON *diag = cJSON_CreateObject();
         cJSON_AddNumberToObject(diag, "audio_volume_setting", cur_vol);
-        cJSON_AddNumberToObject(diag, "set_http_code",  (double)set_http);
-        cJSON_AddNumberToObject(diag, "set_curl_code",  (double)set_rc);
-        cJSON_AddStringToObject(diag, "set_response",
-            set_buf.data ? set_buf.data : "(no response)");
-        cJSON_AddStringToObject(diag, "set_url",  set_url);
-        cJSON_AddNumberToObject(diag, "list_http_code", (double)list_http);
-        cJSON_AddNumberToObject(diag, "list_curl_code", (double)list_rc);
+        cJSON_AddStringToObject(diag, "clip_play_url_example", example_url);
+        cJSON_AddNumberToObject(diag, "list_http_code",  (double)list_http);
+        cJSON_AddNumberToObject(diag, "list_curl_code",  (double)list_rc);
         cJSON_AddStringToObject(diag, "audio_params",
             list_buf.data ? list_buf.data : "(no response)");
 
-        free(set_buf.data);
         free(list_buf.data);
 
         char *diag_out = cJSON_PrintUnformatted(diag);
@@ -1714,10 +1733,8 @@ int main(void) {
     g_app.ax_params = ax_parameter_new(APP_NAME, NULL);
     if (!g_app.ax_params)
         app_log("warning: ax_parameter_new failed — using defaults");
-    else {
+    else
         load_params();
-        set_audio_volume(g_app.audio_volume);
-    }
 
     g_app.fetch_curl = curl_easy_init();
 
