@@ -169,6 +169,7 @@ typedef struct {
     int  enabled;
     int  display_enabled;
     int  display_persist_final;
+    int  audio_volume;          /* 0–100, applies to AudioOutput.A0.Volume */
 
     pthread_mutex_t lock;
     AXParameter    *ax_params;
@@ -184,6 +185,7 @@ static AppState g_app = {
     .enabled             = 1,
     .display_enabled     = 1,
     .display_persist_final = 1,
+    .audio_volume        = 75,
     .running             = 1,
 };
 
@@ -399,6 +401,39 @@ static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
 }
 
 static void play_clip(int clip_id) { play_clip_ex(clip_id, NULL, 0); }
+
+/* ── VAPIX audio volume ───────────────────────────────────────────── */
+static void set_audio_volume(int vol) {
+    if (vol < 0)   vol = 0;
+    if (vol > 100) vol = 100;
+
+    char url[MAX_URL];
+    snprintf(url, sizeof(url),
+             "http://127.0.0.1/axis-cgi/param.cgi?action=update&AudioOutput.A0.Volume=%d", vol);
+
+    CURL *c = curl_easy_init();
+    if (!c) return;
+
+    char cred[128];
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    CurlBuf buf = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERPWD, cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
+
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+
+    app_log("set_audio_volume vol=%d http=%ld rc=%d body=%s",
+            vol, http_code, rc, buf.data ? buf.data : "(empty)");
+    free(buf.data);
+}
 
 /* ── Date helpers ────────────────────────────────────────────────── */
 static void today_str(char *buf, size_t n) {
@@ -1110,6 +1145,10 @@ static void handle_request(int fd) {
         cJSON_AddStringToObject(root, "display_persist_final",g_app.display_persist_final ? "true" : "false");
         cJSON_AddStringToObject(root, "device_user",          g_app.device_user);
         cJSON_AddBoolToObject(root,   "device_pass_set",      strlen(g_app.device_pass) > 0);
+        {
+            char tmp[16]; snprintf(tmp, sizeof(tmp), "%d", g_app.audio_volume);
+            cJSON_AddStringToObject(root, "audio_volume", tmp);
+        }
 
         /* teams array — includes per-team display settings */
         cJSON *tarr = cJSON_AddArrayToObject(root, "teams");
@@ -1161,6 +1200,9 @@ static void handle_request(int fd) {
             SET_INT_STR("poll_interval_sec",     poll_interval_sec)
             SET_BOOL_STR("display_enabled",      display_enabled)
             SET_BOOL_STR("display_persist_final",display_persist_final)
+            SET_INT_STR("audio_volume",          audio_volume)
+            if (g_app.audio_volume < 0)   g_app.audio_volume = 0;
+            if (g_app.audio_volume > 100) g_app.audio_volume = 100;
             SET_STR("device_user",               device_user)
             if ((v = cJSON_GetObjectItem(j, "device_pass")) && cJSON_IsString(v) && strlen(v->valuestring))
                 strncpy(g_app.device_pass, v->valuestring, sizeof(g_app.device_pass)-1);
@@ -1180,6 +1222,8 @@ static void handle_request(int fd) {
                 AXSET("PollIntervalSec",     tmp);
                 AXSET("DisplayEnabled",      g_app.display_enabled ? "true" : "false");
                 AXSET("DisplayPersistFinal", g_app.display_persist_final ? "true" : "false");
+                snprintf(tmp, sizeof(tmp), "%d", g_app.audio_volume);
+                AXSET("AudioVolume",         tmp);
                 AXSET("DeviceUser",          g_app.device_user);
                 if (strlen(g_app.device_pass))
                     AXSET("DevicePass",      g_app.device_pass);
@@ -1187,8 +1231,10 @@ static void handle_request(int fd) {
                 teams_to_json(tmp, sizeof(tmp));
                 AXSET("Teams", tmp);
             }
+            int vol_to_apply = g_app.audio_volume;
             pthread_mutex_unlock(&g_app.lock);
             cJSON_Delete(j);
+            set_audio_volume(vol_to_apply);
         }
         http_respond(fd, 200, "application/json", "{\"message\":\"Saved\"}");
         return;
@@ -1332,15 +1378,8 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /schedule ── */
-    /* Returns games for all monitored teams over today + 6 days, grouped by day,
-       deduplicated by gamePk so cross-team matchups appear only once. */
+    /* Returns ALL MLB games over today + 6 days, grouped by day. */
     if (strcmp(method, "GET") == 0 && ROUTE("/schedule")) {
-        pthread_mutex_lock(&g_app.lock);
-        int num_teams = g_app.num_teams;
-        int team_ids[MAX_TEAMS];
-        for (int i = 0; i < num_teams; i++)
-            team_ids[i] = g_app.teams[i].team_id;
-        pthread_mutex_unlock(&g_app.lock);
 
         /* Pre-build 7 date buckets in order (today … today+6) */
         #define SCHED_DAYS 7
@@ -1353,116 +1392,100 @@ static void handle_request(int fd) {
             day_games[d] = NULL;
         }
 
-        int seen_pks[512];
-        int seen_count = 0;
-        memset(seen_pks, 0, sizeof(seen_pks));
-
-        if (num_teams > 0) {
+        {
             char start[16], end_dt[16];
             today_str(start, sizeof(start));
             date_offset_str(end_dt, sizeof(end_dt), SCHED_DAYS - 1);
 
+            /* Single request — no teamId filter → all 30 teams */
+            char url[MAX_URL];
+            snprintf(url, sizeof(url),
+                MLB_API_BASE "/schedule?sportId=1&startDate=%s&endDate=%s&hydrate=team",
+                start, end_dt);
+
             CURL *sc = curl_easy_init();
-            for (int ti = 0; ti < num_teams; ti++) {
-                char url[MAX_URL];
-                snprintf(url, sizeof(url),
-                    MLB_API_BASE "/schedule?sportId=1&teamId=%d&startDate=%s&endDate=%s&hydrate=team",
-                    team_ids[ti], start, end_dt);
+            CurlBuf sbuf = {NULL, 0};
+            curl_easy_setopt(sc, CURLOPT_URL, url);
+            curl_easy_setopt(sc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            curl_easy_setopt(sc, CURLOPT_WRITEDATA, &sbuf);
+            curl_easy_setopt(sc, CURLOPT_TIMEOUT, 15L);
+            curl_easy_setopt(sc, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(sc, CURLOPT_USERAGENT, APP_NAME "/1.1");
+            curl_easy_perform(sc);
+            curl_easy_cleanup(sc);
 
-                CurlBuf sbuf = {NULL, 0};
-                curl_easy_reset(sc);
-                curl_easy_setopt(sc, CURLOPT_URL, url);
-                curl_easy_setopt(sc, CURLOPT_WRITEFUNCTION, curl_write_cb);
-                curl_easy_setopt(sc, CURLOPT_WRITEDATA, &sbuf);
-                curl_easy_setopt(sc, CURLOPT_TIMEOUT, 10L);
-                curl_easy_setopt(sc, CURLOPT_FOLLOWLOCATION, 1L);
-                curl_easy_setopt(sc, CURLOPT_USERAGENT, APP_NAME "/1.1");
-                curl_easy_perform(sc);
-                if (!sbuf.data) continue;
-
+            if (sbuf.data) {
                 cJSON *sroot = cJSON_Parse(sbuf.data);
                 free(sbuf.data);
-                if (!sroot) continue;
+                if (sroot) {
+                    static const char *mos[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                                "Jul","Aug","Sep","Oct","Nov","Dec"};
+                    static const char *wds[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 
-                static const char *mos[] = {"Jan","Feb","Mar","Apr","May","Jun",
-                                            "Jul","Aug","Sep","Oct","Nov","Dec"};
-                static const char *wds[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+                    cJSON *sdates = cJSON_GetObjectItem(sroot, "dates");
+                    if (cJSON_IsArray(sdates)) {
+                        int nd = cJSON_GetArraySize(sdates);
+                        for (int di = 0; di < nd; di++) {
+                            cJSON *sday  = cJSON_GetArrayItem(sdates, di);
+                            cJSON *dval  = cJSON_GetObjectItem(sday, "date");
+                            cJSON *sgms  = cJSON_GetObjectItem(sday, "games");
+                            if (!cJSON_IsString(dval) || !cJSON_IsArray(sgms)) continue;
 
-                cJSON *sdates = cJSON_GetObjectItem(sroot, "dates");
-                if (cJSON_IsArray(sdates)) {
-                    int nd = cJSON_GetArraySize(sdates);
-                    for (int di = 0; di < nd; di++) {
-                        cJSON *sday  = cJSON_GetArrayItem(sdates, di);
-                        cJSON *dval  = cJSON_GetObjectItem(sday, "date");
-                        cJSON *sgms  = cJSON_GetObjectItem(sday, "games");
-                        if (!cJSON_IsString(dval) || !cJSON_IsArray(sgms)) continue;
+                            /* Find matching bucket */
+                            int slot = -1;
+                            for (int d = 0; d < SCHED_DAYS; d++)
+                                if (strcmp(day_raw[d], dval->valuestring) == 0) { slot = d; break; }
+                            if (slot < 0) continue;
 
-                        /* Find matching bucket */
-                        int slot = -1;
-                        for (int d = 0; d < SCHED_DAYS; d++)
-                            if (strcmp(day_raw[d], dval->valuestring) == 0) { slot = d; break; }
-                        if (slot < 0) continue;
+                            /* Lazily create bucket object */
+                            if (!day_obj[slot]) {
+                                int yr=0, mo=0, dy=0;
+                                sscanf(day_raw[slot], "%d-%d-%d", &yr, &mo, &dy);
+                                struct tm dt = {0};
+                                dt.tm_year = yr-1900; dt.tm_mon = mo-1; dt.tm_mday = dy;
+                                mktime(&dt);
+                                char lbl[32];
+                                snprintf(lbl, sizeof(lbl), "%s, %s %d",
+                                         wds[dt.tm_wday],
+                                         (mo >= 1 && mo <= 12) ? mos[mo-1] : "???", dy);
+                                day_obj[slot]   = cJSON_CreateObject();
+                                cJSON_AddStringToObject(day_obj[slot], "date", lbl);
+                                day_games[slot] = cJSON_AddArrayToObject(day_obj[slot], "games");
+                            }
 
-                        /* Lazily create bucket object */
-                        if (!day_obj[slot]) {
-                            int yr=0, mo=0, dy=0;
-                            sscanf(day_raw[slot], "%d-%d-%d", &yr, &mo, &dy);
-                            struct tm dt = {0};
-                            dt.tm_year = yr-1900; dt.tm_mon = mo-1; dt.tm_mday = dy;
-                            mktime(&dt);
-                            char lbl[32];
-                            snprintf(lbl, sizeof(lbl), "%s, %s %d",
-                                     wds[dt.tm_wday],
-                                     (mo >= 1 && mo <= 12) ? mos[mo-1] : "???", dy);
-                            day_obj[slot]   = cJSON_CreateObject();
-                            cJSON_AddStringToObject(day_obj[slot], "date", lbl);
-                            day_games[slot] = cJSON_AddArrayToObject(day_obj[slot], "games");
-                        }
+                            int ng = cJSON_GetArraySize(sgms);
+                            for (int gi = 0; gi < ng; gi++) {
+                                cJSON *game = cJSON_GetArrayItem(sgms, gi);
+                                cJSON *gdate  = cJSON_GetObjectItem(game, "gameDate");
+                                cJSON *status = cJSON_GetObjectItem(game, "status");
+                                cJSON *abst   = status ? cJSON_GetObjectItem(status, "abstractGameState") : NULL;
+                                cJSON *det    = status ? cJSON_GetObjectItem(status, "detailedState")     : NULL;
+                                cJSON *gteams = cJSON_GetObjectItem(game, "teams");
+                                cJSON *home_t = gteams ? cJSON_GetObjectItem(gteams, "home") : NULL;
+                                cJSON *away_t = gteams ? cJSON_GetObjectItem(gteams, "away") : NULL;
+                                cJSON *ht     = home_t ? cJSON_GetObjectItem(home_t, "team") : NULL;
+                                cJSON *at     = away_t ? cJSON_GetObjectItem(away_t, "team") : NULL;
+                                cJSON *hn     = ht     ? cJSON_GetObjectItem(ht, "teamName") : NULL;
+                                cJSON *an     = at     ? cJSON_GetObjectItem(at, "teamName") : NULL;
 
-                        int ng = cJSON_GetArraySize(sgms);
-                        for (int gi = 0; gi < ng; gi++) {
-                            cJSON *game = cJSON_GetArrayItem(sgms, gi);
-                            cJSON *pk_o = cJSON_GetObjectItem(game, "gamePk");
-                            if (!cJSON_IsNumber(pk_o)) continue;
-                            int pk = (int)pk_o->valuedouble;
+                                char tstr[32] = "--", dummy[32];
+                                if (cJSON_IsString(gdate))
+                                    format_game_time(gdate->valuestring, dummy, sizeof(dummy),
+                                                     tstr, sizeof(tstr));
 
-                            /* Deduplicate */
-                            int dup = 0;
-                            for (int si = 0; si < seen_count; si++)
-                                if (seen_pks[si] == pk) { dup = 1; break; }
-                            if (dup) continue;
-                            if (seen_count < 512) seen_pks[seen_count++] = pk;
-
-                            cJSON *gdate  = cJSON_GetObjectItem(game, "gameDate");
-                            cJSON *status = cJSON_GetObjectItem(game, "status");
-                            cJSON *abst   = status ? cJSON_GetObjectItem(status, "abstractGameState") : NULL;
-                            cJSON *det    = status ? cJSON_GetObjectItem(status, "detailedState")     : NULL;
-                            cJSON *gteams = cJSON_GetObjectItem(game, "teams");
-                            cJSON *home_t = gteams ? cJSON_GetObjectItem(gteams, "home") : NULL;
-                            cJSON *away_t = gteams ? cJSON_GetObjectItem(gteams, "away") : NULL;
-                            cJSON *ht     = home_t ? cJSON_GetObjectItem(home_t, "team") : NULL;
-                            cJSON *at     = away_t ? cJSON_GetObjectItem(away_t, "team") : NULL;
-                            cJSON *hn     = ht     ? cJSON_GetObjectItem(ht, "teamName") : NULL;
-                            cJSON *an     = at     ? cJSON_GetObjectItem(at, "teamName") : NULL;
-
-                            char tstr[32] = "--", dummy[32];
-                            if (cJSON_IsString(gdate))
-                                format_game_time(gdate->valuestring, dummy, sizeof(dummy),
-                                                 tstr, sizeof(tstr));
-
-                            cJSON *g_obj = cJSON_CreateObject();
-                            cJSON_AddStringToObject(g_obj, "time",     tstr);
-                            cJSON_AddStringToObject(g_obj, "away",     cJSON_IsString(an)   ? an->valuestring   : "");
-                            cJSON_AddStringToObject(g_obj, "home",     cJSON_IsString(hn)   ? hn->valuestring   : "");
-                            cJSON_AddStringToObject(g_obj, "state",    cJSON_IsString(abst) ? abst->valuestring : "");
-                            cJSON_AddStringToObject(g_obj, "detailed", cJSON_IsString(det)  ? det->valuestring  : "");
-                            cJSON_AddItemToArray(day_games[slot], g_obj);
+                                cJSON *g_obj = cJSON_CreateObject();
+                                cJSON_AddStringToObject(g_obj, "time",     tstr);
+                                cJSON_AddStringToObject(g_obj, "away",     cJSON_IsString(an)   ? an->valuestring   : "");
+                                cJSON_AddStringToObject(g_obj, "home",     cJSON_IsString(hn)   ? hn->valuestring   : "");
+                                cJSON_AddStringToObject(g_obj, "state",    cJSON_IsString(abst) ? abst->valuestring : "");
+                                cJSON_AddStringToObject(g_obj, "detailed", cJSON_IsString(det)  ? det->valuestring  : "");
+                                cJSON_AddItemToArray(day_games[slot], g_obj);
+                            }
                         }
                     }
+                    cJSON_Delete(sroot);
                 }
-                cJSON_Delete(sroot);
             }
-            curl_easy_cleanup(sc);
         }
 
         /* Assemble output in chronological order, skip empty days */
@@ -1536,6 +1559,7 @@ static void load_params(void) {
     GETINT("PollIntervalSec",     poll_interval_sec)
     GETBOOL("DisplayEnabled",     display_enabled)
     GETBOOL("DisplayPersistFinal",display_persist_final)
+    GETINT("AudioVolume",         audio_volume)
     GETSTR("DeviceUser",          device_user)
     GETSTR("DevicePass",          device_pass)
 
@@ -1601,8 +1625,10 @@ int main(void) {
     g_app.ax_params = ax_parameter_new(APP_NAME, NULL);
     if (!g_app.ax_params)
         app_log("warning: ax_parameter_new failed — using defaults");
-    else
+    else {
         load_params();
+        set_audio_volume(g_app.audio_volume);
+    }
 
     g_app.fetch_curl = curl_easy_init();
 
