@@ -106,12 +106,27 @@ h1 { font-size: 24px; color: #fff; }
 
 /* ── Week schedule ────────────────────────────────────────────── */
 .schedule-wrap {
+    margin-top: 20px;
     margin-bottom: 16px;
+}
+.schedule-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
 }
 .schedule-title {
     font-size: 13px; font-weight: 600; color: #aac4f0;
     text-transform: uppercase; letter-spacing: 0.06em;
-    margin-bottom: 8px;
+}
+.sched-toggle {
+    display: flex; gap: 4px;
+}
+.sched-btn {
+    padding: 3px 10px; font-size: 11px; font-weight: 600;
+    border: 1px solid #1e3a6b; border-radius: 4px;
+    background: #0d1526; color: #7b91b3; cursor: pointer;
+}
+.sched-btn.active {
+    background: #041E42; color: #aac4f0;
 }
 .schedule-day {
     margin-bottom: 12px;
