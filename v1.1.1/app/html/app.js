@@ -427,6 +427,9 @@
                     document.getElementById('device-user').value     = d.device_user || 'root';
                     document.getElementById('disp-enabled').checked  = (d.display_enabled || 'true').toLowerCase() === 'true';
                     document.getElementById('persist-final').checked = (d.display_persist_final || 'true').toLowerCase() === 'true';
+                    var vol = parseInt(d.audio_volume) || 75;
+                    document.getElementById('audio-volume').value     = vol;
+                    document.getElementById('audio-volume-val').textContent = vol;
 
                     /* Build configTeams from response (includes per-team display settings) */
                     configTeams = [];
@@ -462,11 +465,16 @@
         setTimeout(function () { el.textContent = ''; }, 3000);
     }
 
+    document.getElementById('audio-volume').addEventListener('input', function () {
+        document.getElementById('audio-volume-val').textContent = this.value;
+    });
+
     document.getElementById('btn-save').addEventListener('click', function () {
         var data = {
             enabled:               document.getElementById('enabled').checked ? 'true' : 'false',
             poll_interval_sec:     document.getElementById('poll-interval').value,
             device_user:           document.getElementById('device-user').value,
+            audio_volume:          document.getElementById('audio-volume').value,
             display_enabled:       document.getElementById('disp-enabled').checked ? 'true' : 'false',
             display_persist_final: document.getElementById('persist-final').checked ? 'true' : 'false',
             teams: configTeams.map(function (tc) {
