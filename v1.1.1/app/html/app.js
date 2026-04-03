@@ -541,6 +541,33 @@
         document.getElementById('device-pass').value = '';
     });
 
+    /* ── Install bundled clips ── */
+    document.getElementById('btn-install-clips').addEventListener('click', function () {
+        var btn = this;
+        var out = document.getElementById('install-clips-out');
+        btn.disabled = true;
+        btn.textContent = 'Installing…';
+        out.textContent = '';
+        api('/upload_clips', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                var lines = (d.clips || []).map(function (c) {
+                    var ok = c.http_code >= 200 && c.http_code < 300;
+                    return (ok ? '✓' : '✗') + ' ' + c.name +
+                           ' — HTTP ' + c.http_code + '\n  ' + c.response;
+                });
+                out.textContent = lines.join('\n\n') +
+                    '\n\nClip list refreshed — assign clips to teams above.';
+                /* Refresh clip dropdowns so new clips appear */
+                loadClips(function () { renderTeamRows(); });
+            })
+            .catch(function (e) { out.textContent = 'Request failed: ' + e; })
+            .finally(function () {
+                btn.disabled = false;
+                btn.textContent = 'Install Default Clips onto Device';
+            });
+    });
+
     /* ── Volume diagnostics ── */
     document.getElementById('btn-volume-diag').addEventListener('click', function () {
         var btn = this;
@@ -551,14 +578,13 @@
         api('/volume_diag').then(function (r) { return r.json(); }).then(function (d) {
             var lines = [
                 'Volume setting in app: ' + d.audio_volume_setting + '%',
+                '(Volume is sent per-clip via URL — device system level is never changed)',
                 '',
-                '── Set Volume Call ──────────────────',
-                'URL: ' + d.set_url,
-                'HTTP status: ' + d.set_http_code + '  (CURL code: ' + d.set_curl_code + ')',
-                'Response: ' + d.set_response,
+                '── Clip Play URL (what gets sent) ───',
+                d.clip_play_url_example,
                 '',
                 '── Device Audio Parameters ──────────',
-                'HTTP status: ' + d.list_http_code,
+                'HTTP status: ' + d.list_http_code + '  (CURL code: ' + d.list_curl_code + ')',
                 d.audio_params,
             ];
             out.textContent = lines.join('\n');
