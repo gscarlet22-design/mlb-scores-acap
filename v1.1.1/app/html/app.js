@@ -577,11 +577,15 @@
         out.textContent = '';
         api('/volume_diag').then(function (r) { return r.json(); }).then(function (d) {
             var lines = [
-                'Volume setting in app: ' + d.audio_volume_setting + '%',
-                '(Volume is sent per-clip via URL — device system level is never changed)',
+                'Volume setting in app: ' + d.audio_volume_setting + '% → VAPIX scale: ' + d.vapix_volume + ' / 1000',
+                '(Volume sent per-clip via playclip.cgi — device system level is never changed)',
                 '',
                 '── Clip Play URL (what gets sent) ───',
                 d.clip_play_url_example,
+                '',
+                '── Audio Device Control API ─────────',
+                'HTTP status: ' + d.adc_http_code + '  (CURL code: ' + d.adc_curl_code + ')',
+                d.adc_response,
                 '',
                 '── Device Audio Parameters ──────────',
                 'HTTP status: ' + d.list_http_code + '  (CURL code: ' + d.list_curl_code + ')',
