@@ -7,7 +7,7 @@
             "vendor": "gscarlet22 design",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "1.1.7",
+            "version": "1.1.8",
             "user": {
                 "username": "sdk",
                 "group": "sdk"
