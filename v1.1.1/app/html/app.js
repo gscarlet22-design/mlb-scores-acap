@@ -261,6 +261,28 @@
             sgGroup.appendChild(sgLabel);
             sgGroup.appendChild(scoreSel);
 
+            /* Audio enabled toggle */
+            var aeGroup = document.createElement('div');
+            aeGroup.className = 'form-group audio-enabled-group';
+            var aeLabel = document.createElement('label');
+            aeLabel.textContent = 'Audio';
+            var aeToggle = document.createElement('label');
+            aeToggle.className = 'toggle-switch';
+            var aeCheck = document.createElement('input');
+            aeCheck.type = 'checkbox';
+            aeCheck.checked = tc.audio_enabled !== false && tc.audio_enabled !== 0;
+            (function (idx) {
+                aeCheck.addEventListener('change', function () {
+                    configTeams[idx].audio_enabled = this.checked;
+                });
+            })(i);
+            var aeSlider = document.createElement('span');
+            aeSlider.className = 'toggle-slider';
+            aeToggle.appendChild(aeCheck);
+            aeToggle.appendChild(aeSlider);
+            aeGroup.appendChild(aeLabel);
+            aeGroup.appendChild(aeToggle);
+
             /* Test Audio button — plays this team's notify clip */
             var testAudioBtn = document.createElement('button');
             testAudioBtn.className = 'btn-test-audio';
@@ -276,6 +298,7 @@
                 });
             })(tc.team_id);
 
+            audioRow.appendChild(aeGroup);
             audioRow.appendChild(ngGroup);
             audioRow.appendChild(sgGroup);
             audioRow.appendChild(testAudioBtn);
@@ -407,6 +430,7 @@
             team_id:        id,
             notify_clip_id: defClip,
             score_clip_id:  defClip,
+            audio_enabled:  true,
             text_color:     tc.fg,
             bg_color:       tc.bg,
             text_size:      'large',
@@ -439,6 +463,7 @@
                             team_id:        parseInt(t.team_id)        || 0,
                             notify_clip_id: parseInt(t.notify_clip_id) || 38,
                             score_clip_id:  parseInt(t.score_clip_id)  || 38,
+                            audio_enabled:  t.audio_enabled !== false && t.audio_enabled !== 0,
                             text_color:     t.text_color  || tc.fg,
                             bg_color:       t.bg_color    || tc.bg,
                             text_size:      t.text_size   || 'large',
@@ -489,6 +514,7 @@
                     team_id:        String(tc.team_id),
                     notify_clip_id: String(tc.notify_clip_id),
                     score_clip_id:  String(tc.score_clip_id),
+                    audio_enabled:  tc.audio_enabled !== false && tc.audio_enabled !== 0,
                     text_color:     tc.text_color  || '#FFFFFF',
                     bg_color:       tc.bg_color    || '#041E42',
                     text_size:      tc.text_size   || 'large',
@@ -513,6 +539,35 @@
           .catch(function () { showMsg('Save failed'); });
 
         document.getElementById('device-pass').value = '';
+    });
+
+    /* ── Volume diagnostics ── */
+    document.getElementById('btn-volume-diag').addEventListener('click', function () {
+        var btn = this;
+        var out = document.getElementById('volume-diag-out');
+        btn.disabled = true;
+        btn.textContent = 'Running…';
+        out.textContent = '';
+        api('/volume_diag').then(function (r) { return r.json(); }).then(function (d) {
+            var lines = [
+                'Volume setting in app: ' + d.audio_volume_setting + '%',
+                '',
+                '── Set Volume Call ──────────────────',
+                'URL: ' + d.set_url,
+                'HTTP status: ' + d.set_http_code + '  (CURL code: ' + d.set_curl_code + ')',
+                'Response: ' + d.set_response,
+                '',
+                '── Device Audio Parameters ──────────',
+                'HTTP status: ' + d.list_http_code,
+                d.audio_params,
+            ];
+            out.textContent = lines.join('\n');
+        }).catch(function (e) {
+            out.textContent = 'Request failed: ' + e;
+        }).finally(function () {
+            btn.disabled = false;
+            btn.textContent = 'Run Diagnostics';
+        });
     });
 
     /* ── Schedule ── */
