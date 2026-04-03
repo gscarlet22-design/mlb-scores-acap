@@ -198,6 +198,52 @@ h1 { font-size: 24px; color: #fff; }
     display: flex; gap: 8px; align-items: flex-end; margin-bottom: 10px;
 }
 .team-row-audio .form-group { flex: 1; margin-bottom: 0; }
+/* ── Audio enabled toggle switch ─────────────────────────────── */
+.audio-enabled-group {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: flex-end; min-width: 56px;
+}
+.audio-enabled-group label:first-child {
+    font-size: 11px; margin-bottom: 4px; color: #7b91b3;
+}
+.toggle-switch {
+    position: relative; display: inline-block; width: 36px; height: 20px;
+    cursor: pointer;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+    position: absolute; inset: 0; background: #1e3a6b; border-radius: 20px;
+    transition: background 0.2s;
+}
+.toggle-slider::before {
+    content: ''; position: absolute; width: 14px; height: 14px;
+    left: 3px; bottom: 3px; background: #7b91b3; border-radius: 50%;
+    transition: transform 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: #1a6b3a; }
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(16px); background: #4caf7d;
+}
+
+/* ── Volume diagnostics ───────────────────────────────────────── */
+.volume-diag-group { flex-direction: column; align-items: flex-start; gap: 8px; }
+.btn-secondary {
+    padding: 5px 12px; font-size: 12px; font-weight: 600;
+    border: 1px solid #1e3a6b; border-radius: 4px;
+    background: #0d1526; color: #aac4f0; cursor: pointer;
+}
+.btn-secondary:hover { background: #112040; }
+.btn-secondary:disabled { opacity: 0.5; cursor: default; }
+.diag-out {
+    width: 100%; box-sizing: border-box;
+    background: #060e1c; border: 1px solid #1e3a6b; border-radius: 4px;
+    padding: 8px 10px; font-size: 11px; color: #7b91b3; font-family: monospace;
+    white-space: pre-wrap; word-break: break-all; margin: 0;
+    min-height: 0; max-height: 300px; overflow-y: auto;
+    display: none;
+}
+.diag-out:not(:empty) { display: block; }
+
 .btn-test-audio {
     background: #0d1526; border: 1px solid #1e3a6b; color: #aac4f0;
     border-radius: 4px; padding: 8px 10px; font-size: 12px; font-weight: 600;
