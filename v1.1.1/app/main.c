@@ -365,13 +365,15 @@ static long display_show_ex(const char *message, const TeamConfig *cfg,
 
 /* ── VAPIX audio clip playback ───────────────────────────────────── */
 static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
-    /* Volume is passed per-clip via the URL so the device system level is never touched */
+    /* Volume is passed per-clip via playclip.cgi so the device system level is never touched.
+       VAPIX volume range is 0–1000 (100 = default/100%). Our slider is 0–100, so multiply ×10. */
     int vol = g_app.audio_volume;   /* int read — safe without lock on aarch64 */
     if (vol < 0) vol = 0; if (vol > 100) vol = 100;
+    int vapix_vol = vol * 10;
     char url[MAX_URL];
     snprintf(url, sizeof(url),
-             "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=play&clip=%d&volume=%d",
-             clip_id, vol);
+             "http://127.0.0.1/axis-cgi/playclip.cgi?clip=%d&volume=%d",
+             clip_id, vapix_vol);
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -1371,15 +1373,35 @@ static void handle_request(int fd) {
         strncpy(pass, g_app.device_pass, sizeof(pass)-1);
         pthread_mutex_unlock(&g_app.lock);
 
-        /* Build the example clip URL to show what would actually be sent */
+        /* Build the example clip URL showing playclip.cgi with VAPIX 0-1000 scale */
         char example_url[MAX_URL];
         snprintf(example_url, sizeof(example_url),
-            "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=play&clip=%d&volume=%d",
-            ex_clip_id, cur_vol);
+            "http://127.0.0.1/axis-cgi/playclip.cgi?clip=%d&volume=%d",
+            ex_clip_id, cur_vol * 10);
 
-        /* List root.Audio params for reference */
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", user, pass);
+
+        /* Query audiodevicecontrol.cgi for device gain capabilities */
+        const char *adc_body = "{\"apiVersion\":\"1.0\",\"method\":\"getDevicesCapabilities\"}";
+        CURL *ac = curl_easy_init();
+        CurlBuf adc_buf = {NULL, 0};
+        struct curl_slist *adc_hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+        curl_easy_setopt(ac, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
+        curl_easy_setopt(ac, CURLOPT_USERPWD,       cred);
+        curl_easy_setopt(ac, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+        curl_easy_setopt(ac, CURLOPT_HTTPHEADER,    adc_hdrs);
+        curl_easy_setopt(ac, CURLOPT_POSTFIELDS,    adc_body);
+        curl_easy_setopt(ac, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(ac, CURLOPT_WRITEDATA,     &adc_buf);
+        curl_easy_setopt(ac, CURLOPT_TIMEOUT,       5L);
+        CURLcode adc_rc = curl_easy_perform(ac);
+        long adc_http = -1;
+        curl_easy_getinfo(ac, CURLINFO_RESPONSE_CODE, &adc_http);
+        curl_easy_cleanup(ac);
+        curl_slist_free_all(adc_hdrs);
+
+        /* List root.Audio params for reference */
         char list_url[MAX_URL];
         snprintf(list_url, sizeof(list_url),
             "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.Audio");
@@ -1397,13 +1419,19 @@ static void handle_request(int fd) {
         curl_easy_cleanup(lc);
 
         cJSON *diag = cJSON_CreateObject();
-        cJSON_AddNumberToObject(diag, "audio_volume_setting", cur_vol);
+        cJSON_AddNumberToObject(diag, "audio_volume_setting",  cur_vol);
+        cJSON_AddNumberToObject(diag, "vapix_volume",          cur_vol * 10);
         cJSON_AddStringToObject(diag, "clip_play_url_example", example_url);
+        cJSON_AddNumberToObject(diag, "adc_http_code",  (double)adc_http);
+        cJSON_AddNumberToObject(diag, "adc_curl_code",  (double)adc_rc);
+        cJSON_AddStringToObject(diag, "adc_response",
+            adc_buf.data ? adc_buf.data : "(no response)");
         cJSON_AddNumberToObject(diag, "list_http_code",  (double)list_http);
         cJSON_AddNumberToObject(diag, "list_curl_code",  (double)list_rc);
         cJSON_AddStringToObject(diag, "audio_params",
             list_buf.data ? list_buf.data : "(no response)");
 
+        free(adc_buf.data);
         free(list_buf.data);
 
         char *diag_out = cJSON_PrintUnformatted(diag);
