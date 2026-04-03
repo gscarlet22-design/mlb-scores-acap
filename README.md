@@ -1,6 +1,6 @@
 # MLB Live Scores — Axis C1720 / C1710 ACAP
 
-**Latest: Version 1.1.2** — gscarlet22 design
+**Latest: Version 1.1.3** — gscarlet22 design
 
 Displays live MLB scores on the Axis C1720 or C1710 speaker display and plays
 audio clips on scoring plays. Monitor up to 8 teams simultaneously, each with
@@ -197,7 +197,7 @@ curl -u root:<password> \
 
 ---
 
-## Configuring (v1.1.2)
+## Configuring (v1.1.3)
 
 1. Go to **Apps → MLB Live Scores → Open**
 2. On the **Config** tab:
@@ -212,6 +212,9 @@ curl -u root:<password> \
 
 **Device Credentials**
 - Enter the device username and password — required for VAPIX display and audio calls
+
+**Audio**
+- Output Volume slider (0–100%) — sets `AudioOutput.A0.Volume` on the device via VAPIX; applied immediately on save and on every app start
 
 **Polling**
 - Live game poll interval: 15 / 30 / 60 / 120 seconds (default 30 s)
@@ -335,6 +338,7 @@ journalctl -u mlb_scores -f
 
 | Version | Changes |
 |---------|---------|
+| 1.1.3 | Output volume slider in Config tab (0–100%); applied via VAPIX param.cgi on save and on startup |
 | 1.1.2 | Week schedule in Status tab (7-day game calendar for monitored teams); inning change audio now fires on every half-inning change; "Notify Sound" renamed to "Inning Change Sound"; Today: label on pre-game status cards |
 | 1.1.1 | Per-team display settings (text color, background, text size, scroll speed, duration) — each defaults to team's official MLB colors; Test Audio button restored per-team; fixed last_play showing in status cards |
 | 1.1.0 | Multi-team support (up to 8 teams); per-team audio clips; display fires only on score or inning change; scoreboard cards in Status tab; auto-migration from 1.0.x single-team config; repo reorganized into versioned folders |
