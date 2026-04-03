@@ -1,3 +1,4 @@
+#define _GNU_SOURCE   /* timegm() */
 /*
  * mlb_scores - MLB live score ACAP v1.1.1
  * Vendor: gscarlet22 design for Axis C1720 / C1710
@@ -461,8 +462,8 @@ static void format_game_time(const char *iso, char *date_out, size_t dn,
     snprintf(date_out, dn, "%s %d", mon, dy);
     struct tm t = {0};
     t.tm_year = yr - 1900; t.tm_mon = mo - 1; t.tm_mday = dy;
-    t.tm_hour = hr; t.tm_min = mn; t.tm_isdst = -1;
-    time_t utc = mktime(&t);
+    t.tm_hour = hr; t.tm_min = mn; t.tm_isdst = 0;
+    time_t utc = timegm(&t);  /* treat parsed fields as UTC, not local */
     struct tm local_tm;
     localtime_r(&utc, &local_tm);
     int lhr = local_tm.tm_hour, lmn = local_tm.tm_min;
