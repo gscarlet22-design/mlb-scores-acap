@@ -105,6 +105,15 @@
                 <label for="audio-volume">Output Volume: <span id="audio-volume-val">75</span>%</label>
                 <input type="range" id="audio-volume" min="0" max="100" value="75">
             </div>
+            <div class="form-group">
+                <label>Bundled Clips</label>
+                <div class="bundled-clips-list">
+                    <span class="bundled-clip-name">🎵 Hit a Run!</span>
+                    <span class="bundled-clip-name">🎵 Inning Change Organ</span>
+                </div>
+                <button class="btn-secondary" id="btn-install-clips">Install Default Clips onto Device</button>
+                <pre id="install-clips-out" class="diag-out"></pre>
+            </div>
             <div class="form-group volume-diag-group">
                 <button class="btn-secondary" id="btn-volume-diag">Run Diagnostics</button>
                 <pre id="volume-diag-out" class="diag-out"></pre>
