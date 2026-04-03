@@ -79,9 +79,13 @@
             }
 
             /* Next game row */
+            var isPreview = !isLive && !isFinal &&
+                            (t.game_state === 'Preview' || t.game_state === 'Pre-Game' ||
+                             t.game_state === 'Warmup'  || t.game_state === 'Scheduled');
             var nextHtml = '';
             if (!isLive && !isFinal && t.next_game_opponent) {
-                nextHtml = '<div class="card-next">Next: ' +
+                var gameLabel = isPreview ? 'Today:' : 'Next:';
+                nextHtml = '<div class="card-next">' + gameLabel + ' ' +
                     (t.next_game_home ? 'vs' : '@') + ' ' + t.next_game_opponent +
                     ' &nbsp;|&nbsp; ' + t.next_game_date + ' ' + t.next_game_time +
                     '</div>';
@@ -234,7 +238,7 @@
             var ngGroup = document.createElement('div');
             ngGroup.className = 'form-group';
             var ngLabel = document.createElement('label');
-            ngLabel.textContent = 'Notify Sound';
+            ngLabel.textContent = 'Inning Change Sound';
             var notifySel = buildClipSelect(tc.notify_clip_id);
             notifySel.dataset.field = 'notify';
             notifySel.dataset.idx   = i;
@@ -495,6 +499,69 @@
 
         document.getElementById('device-pass').value = '';
     });
+
+    /* ── Schedule ── */
+    function renderSchedule(data) {
+        var container = document.getElementById('schedule');
+        container.innerHTML = '';
+        var days = data.days || [];
+        if (days.length === 0) {
+            container.innerHTML = '<div class="schedule-empty">No games found for monitored teams this week.</div>';
+            return;
+        }
+        days.forEach(function (day) {
+            var wrap = document.createElement('div');
+            wrap.className = 'schedule-day';
+
+            var hdr = document.createElement('div');
+            hdr.className = 'schedule-day-header';
+            hdr.textContent = day.date;
+            wrap.appendChild(hdr);
+
+            (day.games || []).forEach(function (g) {
+                var row = document.createElement('div');
+                row.className = 'schedule-game';
+
+                var matchup = document.createElement('span');
+                matchup.className = 'schedule-matchup';
+                matchup.textContent = g.away + ' @ ' + g.home;
+
+                var stateEl = document.createElement('span');
+                var st = g.state || '';
+                var det = g.detailed || '';
+                if (st === 'Live') {
+                    stateEl.className = 'schedule-state live';
+                    stateEl.textContent = det || 'LIVE';
+                } else if (st === 'Final') {
+                    stateEl.className = 'schedule-state final';
+                    stateEl.textContent = 'Final';
+                } else {
+                    stateEl.className = 'schedule-state';
+                    stateEl.textContent = '';
+                }
+
+                var timeEl = document.createElement('span');
+                timeEl.className = 'schedule-time';
+                timeEl.textContent = g.time;
+
+                row.appendChild(matchup);
+                row.appendChild(timeEl);
+                if (stateEl.textContent) row.appendChild(stateEl);
+                wrap.appendChild(row);
+            });
+
+            container.appendChild(wrap);
+        });
+    }
+
+    function refreshSchedule() {
+        api('/schedule').then(function (r) { return r.json(); }).then(function (d) {
+            renderSchedule(d);
+        }).catch(function () {});
+    }
+
+    refreshSchedule();
+    setInterval(refreshSchedule, 60000);
 
     /* ── Test display ── */
     document.getElementById('btn-test-display').addEventListener('click', function () {
