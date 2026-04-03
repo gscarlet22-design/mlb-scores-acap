@@ -606,12 +606,17 @@ static void update_teams_from_config(cJSON *teams_arr) {
 }
 
 /* ── MLB API: find today's game pk for a team ───────────────────── */
-static int fetch_game_pk_for_team(CURL *curl, int team_id) {
+/* Also populates state->next_game_opponent/home/date/time so that
+   Preview-state cards can display the same info as No-Game cards. */
+static int fetch_game_pk_for_team(CURL *curl, int idx) {
+    TeamConfig *cfg   = &g_app.teams[idx];
+    TeamState  *state = &g_app.state[idx];
+
     char date[16], url[MAX_URL];
     today_str(date, sizeof(date));
     snprintf(url, sizeof(url),
         MLB_API_BASE "/schedule?sportId=1&teamId=%d&date=%s&hydrate=team",
-        team_id, date);
+        cfg->team_id, date);
 
     char *body = http_get(curl, url);
     if (!body) return 0;
@@ -630,6 +635,32 @@ static int fetch_game_pk_for_team(CURL *curl, int team_id) {
             cJSON *pk_obj = cJSON_GetObjectItem(game, "gamePk");
             if (cJSON_IsNumber(pk_obj))
                 game_pk = (int)pk_obj->valuedouble;
+
+            /* Populate today's opponent/home/time so Preview cards render correctly */
+            if (game_pk) {
+                cJSON *gt    = cJSON_GetObjectItem(game, "gameDate");
+                cJSON *teams = cJSON_GetObjectItem(game, "teams");
+                if (teams && cJSON_IsString(gt)) {
+                    cJSON *home = cJSON_GetObjectItem(teams, "home");
+                    cJSON *away = cJSON_GetObjectItem(teams, "away");
+                    int is_home = 0;
+                    if (home) {
+                        cJSON *ht  = cJSON_GetObjectItem(home, "team");
+                        cJSON *hid = ht ? cJSON_GetObjectItem(ht, "id") : NULL;
+                        if (cJSON_IsNumber(hid) && (int)hid->valuedouble == cfg->team_id)
+                            is_home = 1;
+                    }
+                    cJSON *opp_side = cJSON_GetObjectItem(is_home ? away : home, "team");
+                    cJSON *opp_name = opp_side ? cJSON_GetObjectItem(opp_side, "teamName") : NULL;
+                    if (cJSON_IsString(opp_name))
+                        strncpy(state->next_game_opponent, opp_name->valuestring,
+                                sizeof(state->next_game_opponent)-1);
+                    state->next_game_home = is_home;
+                    format_game_time(gt->valuestring,
+                                     state->next_game_date, sizeof(state->next_game_date),
+                                     state->next_game_time, sizeof(state->next_game_time));
+                }
+            }
         }
     }
     cJSON_Delete(root);
@@ -868,7 +899,7 @@ static void poll_one_team(int idx) {
 
     /* ── Find today's game if we don't have one ── */
     if (state->current_game_pk == 0) {
-        int pk = fetch_game_pk_for_team(g_app.fetch_curl, cfg->team_id);
+        int pk = fetch_game_pk_for_team(g_app.fetch_curl, idx);
         if (pk == 0) {
             state->next_game_opponent[0] = '\0';
             fetch_next_game_for_team(g_app.fetch_curl, idx);
@@ -877,7 +908,8 @@ static void poll_one_team(int idx) {
             state->is_live = 0;
             return;
         }
-        state->next_game_opponent[0] = '\0';
+        /* next_game_opponent/home/date/time were populated by fetch_game_pk_for_team
+           so Preview-state cards show the correct opponent and time */
         state->current_game_pk = pk;
         app_log("[%s] found game pk=%d", state->team_name, pk);
     }
@@ -937,6 +969,9 @@ static void poll_one_team(int idx) {
         if (score_changed) {
             if (my_scored) play_clip(cfg->score_clip_id);
             else           play_clip(cfg->notify_clip_id);
+        } else if (inning_changed) {
+            /* Inning change without score change: play notify (inning change) clip */
+            play_clip(cfg->notify_clip_id);
         }
     }
 
@@ -1293,6 +1328,158 @@ static void handle_request(int fd) {
         http_respond(fd, 200, "application/json", out ? out : "{}");
         free(out);
         cJSON_Delete(root);
+        return;
+    }
+
+    /* ── GET /schedule ── */
+    /* Returns games for all monitored teams over today + 6 days, grouped by day,
+       deduplicated by gamePk so cross-team matchups appear only once. */
+    if (strcmp(method, "GET") == 0 && ROUTE("/schedule")) {
+        pthread_mutex_lock(&g_app.lock);
+        int num_teams = g_app.num_teams;
+        int team_ids[MAX_TEAMS];
+        for (int i = 0; i < num_teams; i++)
+            team_ids[i] = g_app.teams[i].team_id;
+        pthread_mutex_unlock(&g_app.lock);
+
+        /* Pre-build 7 date buckets in order (today … today+6) */
+        #define SCHED_DAYS 7
+        char     day_raw[SCHED_DAYS][16];
+        cJSON   *day_obj[SCHED_DAYS];
+        cJSON   *day_games[SCHED_DAYS];
+        for (int d = 0; d < SCHED_DAYS; d++) {
+            date_offset_str(day_raw[d], sizeof(day_raw[d]), d);
+            day_obj[d]   = NULL;
+            day_games[d] = NULL;
+        }
+
+        int seen_pks[512];
+        int seen_count = 0;
+        memset(seen_pks, 0, sizeof(seen_pks));
+
+        if (num_teams > 0) {
+            char start[16], end_dt[16];
+            today_str(start, sizeof(start));
+            date_offset_str(end_dt, sizeof(end_dt), SCHED_DAYS - 1);
+
+            CURL *sc = curl_easy_init();
+            for (int ti = 0; ti < num_teams; ti++) {
+                char url[MAX_URL];
+                snprintf(url, sizeof(url),
+                    MLB_API_BASE "/schedule?sportId=1&teamId=%d&startDate=%s&endDate=%s&hydrate=team",
+                    team_ids[ti], start, end_dt);
+
+                CurlBuf sbuf = {NULL, 0};
+                curl_easy_reset(sc);
+                curl_easy_setopt(sc, CURLOPT_URL, url);
+                curl_easy_setopt(sc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+                curl_easy_setopt(sc, CURLOPT_WRITEDATA, &sbuf);
+                curl_easy_setopt(sc, CURLOPT_TIMEOUT, 10L);
+                curl_easy_setopt(sc, CURLOPT_FOLLOWLOCATION, 1L);
+                curl_easy_setopt(sc, CURLOPT_USERAGENT, APP_NAME "/1.1");
+                curl_easy_perform(sc);
+                if (!sbuf.data) continue;
+
+                cJSON *sroot = cJSON_Parse(sbuf.data);
+                free(sbuf.data);
+                if (!sroot) continue;
+
+                static const char *mos[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                            "Jul","Aug","Sep","Oct","Nov","Dec"};
+                static const char *wds[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+
+                cJSON *sdates = cJSON_GetObjectItem(sroot, "dates");
+                if (cJSON_IsArray(sdates)) {
+                    int nd = cJSON_GetArraySize(sdates);
+                    for (int di = 0; di < nd; di++) {
+                        cJSON *sday  = cJSON_GetArrayItem(sdates, di);
+                        cJSON *dval  = cJSON_GetObjectItem(sday, "date");
+                        cJSON *sgms  = cJSON_GetObjectItem(sday, "games");
+                        if (!cJSON_IsString(dval) || !cJSON_IsArray(sgms)) continue;
+
+                        /* Find matching bucket */
+                        int slot = -1;
+                        for (int d = 0; d < SCHED_DAYS; d++)
+                            if (strcmp(day_raw[d], dval->valuestring) == 0) { slot = d; break; }
+                        if (slot < 0) continue;
+
+                        /* Lazily create bucket object */
+                        if (!day_obj[slot]) {
+                            int yr=0, mo=0, dy=0;
+                            sscanf(day_raw[slot], "%d-%d-%d", &yr, &mo, &dy);
+                            struct tm dt = {0};
+                            dt.tm_year = yr-1900; dt.tm_mon = mo-1; dt.tm_mday = dy;
+                            mktime(&dt);
+                            char lbl[32];
+                            snprintf(lbl, sizeof(lbl), "%s, %s %d",
+                                     wds[dt.tm_wday],
+                                     (mo >= 1 && mo <= 12) ? mos[mo-1] : "???", dy);
+                            day_obj[slot]   = cJSON_CreateObject();
+                            cJSON_AddStringToObject(day_obj[slot], "date", lbl);
+                            day_games[slot] = cJSON_AddArrayToObject(day_obj[slot], "games");
+                        }
+
+                        int ng = cJSON_GetArraySize(sgms);
+                        for (int gi = 0; gi < ng; gi++) {
+                            cJSON *game = cJSON_GetArrayItem(sgms, gi);
+                            cJSON *pk_o = cJSON_GetObjectItem(game, "gamePk");
+                            if (!cJSON_IsNumber(pk_o)) continue;
+                            int pk = (int)pk_o->valuedouble;
+
+                            /* Deduplicate */
+                            int dup = 0;
+                            for (int si = 0; si < seen_count; si++)
+                                if (seen_pks[si] == pk) { dup = 1; break; }
+                            if (dup) continue;
+                            if (seen_count < 512) seen_pks[seen_count++] = pk;
+
+                            cJSON *gdate  = cJSON_GetObjectItem(game, "gameDate");
+                            cJSON *status = cJSON_GetObjectItem(game, "status");
+                            cJSON *abst   = status ? cJSON_GetObjectItem(status, "abstractGameState") : NULL;
+                            cJSON *det    = status ? cJSON_GetObjectItem(status, "detailedState")     : NULL;
+                            cJSON *gteams = cJSON_GetObjectItem(game, "teams");
+                            cJSON *home_t = gteams ? cJSON_GetObjectItem(gteams, "home") : NULL;
+                            cJSON *away_t = gteams ? cJSON_GetObjectItem(gteams, "away") : NULL;
+                            cJSON *ht     = home_t ? cJSON_GetObjectItem(home_t, "team") : NULL;
+                            cJSON *at     = away_t ? cJSON_GetObjectItem(away_t, "team") : NULL;
+                            cJSON *hn     = ht     ? cJSON_GetObjectItem(ht, "teamName") : NULL;
+                            cJSON *an     = at     ? cJSON_GetObjectItem(at, "teamName") : NULL;
+
+                            char tstr[32] = "--", dummy[32];
+                            if (cJSON_IsString(gdate))
+                                format_game_time(gdate->valuestring, dummy, sizeof(dummy),
+                                                 tstr, sizeof(tstr));
+
+                            cJSON *g_obj = cJSON_CreateObject();
+                            cJSON_AddStringToObject(g_obj, "time",     tstr);
+                            cJSON_AddStringToObject(g_obj, "away",     cJSON_IsString(an)   ? an->valuestring   : "");
+                            cJSON_AddStringToObject(g_obj, "home",     cJSON_IsString(hn)   ? hn->valuestring   : "");
+                            cJSON_AddStringToObject(g_obj, "state",    cJSON_IsString(abst) ? abst->valuestring : "");
+                            cJSON_AddStringToObject(g_obj, "detailed", cJSON_IsString(det)  ? det->valuestring  : "");
+                            cJSON_AddItemToArray(day_games[slot], g_obj);
+                        }
+                    }
+                }
+                cJSON_Delete(sroot);
+            }
+            curl_easy_cleanup(sc);
+        }
+
+        /* Assemble output in chronological order, skip empty days */
+        cJSON *out_root = cJSON_CreateObject();
+        cJSON *days_out = cJSON_AddArrayToObject(out_root, "days");
+        for (int d = 0; d < SCHED_DAYS; d++) {
+            if (day_obj[d] && cJSON_GetArraySize(day_games[d]) > 0)
+                cJSON_AddItemToArray(days_out, day_obj[d]);
+            else if (day_obj[d])
+                cJSON_Delete(day_obj[d]);
+        }
+        #undef SCHED_DAYS
+
+        char *out = cJSON_PrintUnformatted(out_root);
+        http_respond(fd, 200, "application/json", out ? out : "{\"days\":[]}");
+        free(out);
+        cJSON_Delete(out_root);
         return;
     }
 
