@@ -468,6 +468,13 @@
     document.getElementById('audio-volume').addEventListener('input', function () {
         document.getElementById('audio-volume-val').textContent = this.value;
     });
+    document.getElementById('audio-volume').addEventListener('change', function () {
+        api('/config', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ audio_volume: this.value }),
+        }).catch(function () {});
+    });
 
     document.getElementById('btn-save').addEventListener('click', function () {
         var data = {
@@ -509,15 +516,56 @@
     });
 
     /* ── Schedule ── */
+    var scheduleFilter   = 'all';
+    var lastScheduleData = null;
+
+    document.getElementById('sched-btn-all').addEventListener('click', function () {
+        scheduleFilter = 'all';
+        document.getElementById('sched-btn-all').classList.add('active');
+        document.getElementById('sched-btn-mine').classList.remove('active');
+        if (lastScheduleData) renderSchedule(lastScheduleData);
+    });
+    document.getElementById('sched-btn-mine').addEventListener('click', function () {
+        scheduleFilter = 'my_teams';
+        document.getElementById('sched-btn-mine').classList.add('active');
+        document.getElementById('sched-btn-all').classList.remove('active');
+        if (lastScheduleData) renderSchedule(lastScheduleData);
+    });
+
     function renderSchedule(data) {
+        lastScheduleData = data;
         var container = document.getElementById('schedule');
         container.innerHTML = '';
         var days = data.days || [];
-        if (days.length === 0) {
-            container.innerHTML = '<div class="schedule-empty">No games found for monitored teams this week.</div>';
+
+        /* Build my-teams name set when filter is active */
+        var myTeamNames = null;
+        if (scheduleFilter === 'my_teams') {
+            myTeamNames = {};
+            configTeams.forEach(function (tc) {
+                var meta = getTeamMeta(tc.team_id);
+                if (meta) myTeamNames[meta.name] = true;
+            });
+        }
+
+        /* Filter days/games */
+        var filteredDays = days.map(function (day) {
+            if (!myTeamNames) return day;
+            var games = (day.games || []).filter(function (g) {
+                return myTeamNames[g.away] || myTeamNames[g.home];
+            });
+            return { date: day.date, games: games };
+        }).filter(function (day) { return day.games.length > 0; });
+
+        if (filteredDays.length === 0) {
+            var msg = scheduleFilter === 'my_teams'
+                ? (configTeams.length === 0 ? 'No teams configured.' : 'No games for monitored teams this week.')
+                : 'No games found this week.';
+            container.innerHTML = '<div class="schedule-empty">' + msg + '</div>';
             return;
         }
-        days.forEach(function (day) {
+
+        filteredDays.forEach(function (day) {
             var wrap = document.createElement('div');
             wrap.className = 'schedule-day';
 
