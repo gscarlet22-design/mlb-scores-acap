@@ -114,6 +114,7 @@ typedef struct {
     int  team_id;
     int  notify_clip_id;
     int  score_clip_id;
+    int  audio_enabled;    /* 1 = play sounds for this team, 0 = silent */
     /* Per-team display settings */
     char text_color[16];   /* e.g. "#FFFFFF" */
     char bg_color[16];     /* e.g. "#004687" */
@@ -480,11 +481,12 @@ static void teams_to_json(char *buf, size_t n) {
     for (int i = 0; i < g_app.num_teams && pos < n - 2; i++) {
         if (i > 0) pos += snprintf(buf + pos, n - pos, ",");
         pos += snprintf(buf + pos, n - pos,
-            "{\"id\":%d,\"notify\":%d,\"score\":%d"
+            "{\"id\":%d,\"notify\":%d,\"score\":%d,\"ae\":%d"
             ",\"tc\":\"%s\",\"bc\":\"%s\",\"ts\":\"%s\",\"ss\":%d,\"dm\":%d}",
             g_app.teams[i].team_id,
             g_app.teams[i].notify_clip_id,
             g_app.teams[i].score_clip_id,
+            g_app.teams[i].audio_enabled,
             g_app.teams[i].text_color,
             g_app.teams[i].bg_color,
             g_app.teams[i].text_size,
@@ -500,8 +502,9 @@ static void set_team_display_defaults(TeamConfig *tc, int team_id) {
     strncpy(tc->text_color, mt ? mt->fg : "#FFFFFF", sizeof(tc->text_color)-1);
     strncpy(tc->bg_color,   mt ? mt->bg : "#041E42", sizeof(tc->bg_color)-1);
     strncpy(tc->text_size,  "large", sizeof(tc->text_size)-1);
-    tc->scroll_speed = 3;
-    tc->duration_ms  = 20000;
+    tc->scroll_speed  = 3;
+    tc->duration_ms   = 20000;
+    tc->audio_enabled = 1;
 }
 
 /* Parse JSON array string into g_app.teams[] and init state names.
@@ -525,6 +528,9 @@ static void teams_from_json(const char *json) {
         g_app.teams[idx].score_clip_id  = cJSON_IsNumber(score)  ? (int)score->valuedouble  : 38;
 
         /* Display: short keys in stored JSON; fall back to MLB team colors */
+        cJSON *ae = cJSON_GetObjectItem(item, "ae");
+        g_app.teams[idx].audio_enabled = cJSON_IsNumber(ae) ? (int)ae->valuedouble : 1;
+
         cJSON *tc = cJSON_GetObjectItem(item, "tc");
         cJSON *bc = cJSON_GetObjectItem(item, "bc");
         cJSON *ts = cJSON_GetObjectItem(item, "ts");
@@ -608,6 +614,9 @@ static void update_teams_from_config(cJSON *teams_arr) {
                                           cJSON_IsNumber(notify) ? (int)notify->valuedouble : 38;
         g_app.teams[idx].score_clip_id  = cJSON_IsString(score) ? atoi(score->valuestring) :
                                           cJSON_IsNumber(score)  ? (int)score->valuedouble  : 38;
+
+        cJSON *ae = cJSON_GetObjectItem(item, "audio_enabled");
+        g_app.teams[idx].audio_enabled = ae ? (cJSON_IsTrue(ae) || (cJSON_IsString(ae) && strcmp(ae->valuestring,"true")==0) || (cJSON_IsNumber(ae) && ae->valuedouble != 0.0)) ? 1 : 0 : 1;
 
         /* Per-team display settings from POST body (long key names) */
         cJSON *tc = cJSON_GetObjectItem(item, "text_color");
@@ -1002,12 +1011,13 @@ static void poll_one_team(int idx) {
         }
 
         /* Audio: per-team clips */
-        if (score_changed) {
-            if (my_scored) play_clip(cfg->score_clip_id);
-            else           play_clip(cfg->notify_clip_id);
-        } else if (inning_changed) {
-            /* Inning change without score change: play notify (inning change) clip */
-            play_clip(cfg->notify_clip_id);
+        if (cfg->audio_enabled) {
+            if (score_changed) {
+                if (my_scored) play_clip(cfg->score_clip_id);
+                else           play_clip(cfg->notify_clip_id);
+            } else if (inning_changed) {
+                play_clip(cfg->notify_clip_id);
+            }
         }
     }
 
@@ -1162,6 +1172,7 @@ static void handle_request(int fd) {
             cJSON_AddStringToObject(t, "notify_clip_id", tmp);
             snprintf(tmp, sizeof(tmp), "%d", g_app.teams[i].score_clip_id);
             cJSON_AddStringToObject(t, "score_clip_id", tmp);
+            cJSON_AddBoolToObject(t, "audio_enabled", g_app.teams[i].audio_enabled);
             cJSON_AddStringToObject(t, "text_color", g_app.teams[i].text_color);
             cJSON_AddStringToObject(t, "bg_color",   g_app.teams[i].bg_color);
             cJSON_AddStringToObject(t, "text_size",  g_app.teams[i].text_size);
@@ -1296,13 +1307,90 @@ static void handle_request(int fd) {
             clip_id = g_app.teams[0].notify_clip_id;
         pthread_mutex_unlock(&g_app.lock);
 
+        int vol = 75;
+        pthread_mutex_lock(&g_app.lock);
+        vol = g_app.audio_volume;
+        pthread_mutex_unlock(&g_app.lock);
+        set_audio_volume(vol);
+
         char clip_resp[512] = "";
         long clip_http = play_clip_ex(clip_id, clip_resp, sizeof(clip_resp));
-        char out[640];
+        char out[700];
         snprintf(out, sizeof(out),
-            "{\"message\":\"ok\",\"clip_id\":%d,\"clip_http\":%ld,\"clip_resp\":\"%s\"}",
-            clip_id, clip_http, clip_resp);
+            "{\"message\":\"ok\",\"clip_id\":%d,\"clip_http\":%ld,\"volume_applied\":%d,\"clip_resp\":\"%s\"}",
+            clip_id, clip_http, vol, clip_resp);
         http_respond(fd, 200, "application/json", out);
+        return;
+    }
+
+    /* ── GET /volume_diag ── */
+    /* Returns current volume setting, VAPIX set result, and full audio param list
+       to help diagnose volume control issues. */
+    if (strcmp(method, "GET") == 0 && ROUTE("/volume_diag")) {
+        pthread_mutex_lock(&g_app.lock);
+        int cur_vol = g_app.audio_volume;
+        char user[64], pass[64];
+        strncpy(user, g_app.device_user, sizeof(user)-1);
+        strncpy(pass, g_app.device_pass, sizeof(pass)-1);
+        pthread_mutex_unlock(&g_app.lock);
+
+        char cred[128];
+        snprintf(cred, sizeof(cred), "%s:%s", user, pass);
+
+        /* 1. Try to set the current volume and capture the raw response */
+        char set_url[MAX_URL];
+        snprintf(set_url, sizeof(set_url),
+            "http://127.0.0.1/axis-cgi/param.cgi?action=update&root.AudioOutput.A0.Volume=%d",
+            cur_vol);
+        CURL *dc = curl_easy_init();
+        CurlBuf set_buf = {NULL, 0};
+        curl_easy_setopt(dc, CURLOPT_URL, set_url);
+        curl_easy_setopt(dc, CURLOPT_USERPWD, cred);
+        curl_easy_setopt(dc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+        curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(dc, CURLOPT_WRITEDATA, &set_buf);
+        curl_easy_setopt(dc, CURLOPT_TIMEOUT, 5L);
+        CURLcode set_rc = curl_easy_perform(dc);
+        long set_http = -1;
+        curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &set_http);
+        curl_easy_cleanup(dc);
+
+        /* 2. List all root.Audio params to discover what's available */
+        char list_url[MAX_URL];
+        snprintf(list_url, sizeof(list_url),
+            "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.Audio");
+        CURL *lc = curl_easy_init();
+        CurlBuf list_buf = {NULL, 0};
+        curl_easy_setopt(lc, CURLOPT_URL, list_url);
+        curl_easy_setopt(lc, CURLOPT_USERPWD, cred);
+        curl_easy_setopt(lc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+        curl_easy_setopt(lc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(lc, CURLOPT_WRITEDATA, &list_buf);
+        curl_easy_setopt(lc, CURLOPT_TIMEOUT, 5L);
+        CURLcode list_rc = curl_easy_perform(lc);
+        long list_http = -1;
+        curl_easy_getinfo(lc, CURLINFO_RESPONSE_CODE, &list_http);
+        curl_easy_cleanup(lc);
+
+        cJSON *diag = cJSON_CreateObject();
+        cJSON_AddNumberToObject(diag, "audio_volume_setting", cur_vol);
+        cJSON_AddNumberToObject(diag, "set_http_code",  (double)set_http);
+        cJSON_AddNumberToObject(diag, "set_curl_code",  (double)set_rc);
+        cJSON_AddStringToObject(diag, "set_response",
+            set_buf.data ? set_buf.data : "(no response)");
+        cJSON_AddStringToObject(diag, "set_url",  set_url);
+        cJSON_AddNumberToObject(diag, "list_http_code", (double)list_http);
+        cJSON_AddNumberToObject(diag, "list_curl_code", (double)list_rc);
+        cJSON_AddStringToObject(diag, "audio_params",
+            list_buf.data ? list_buf.data : "(no response)");
+
+        free(set_buf.data);
+        free(list_buf.data);
+
+        char *diag_out = cJSON_PrintUnformatted(diag);
+        http_respond(fd, 200, "application/json", diag_out ? diag_out : "{}");
+        free(diag_out);
+        cJSON_Delete(diag);
         return;
     }
 
