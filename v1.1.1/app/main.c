@@ -1694,7 +1694,7 @@ static void handle_request(int fd) {
             se        ? "true" : "false",
             accent_buf,
             mapped_buf,
-            g_app.num_strobe_colors);
+            g_app.num_strobe_palette);
         http_respond(fd, 200, "application/json", out);
         return;
     }
