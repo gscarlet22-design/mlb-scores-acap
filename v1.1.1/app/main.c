@@ -1539,6 +1539,63 @@ static void handle_request(int fd) {
         return;
     }
 
+    /* ── POST /test_strobe ── */
+    /* Accepts optional {"team_id": N} body; fires strobe for that team's accent color.
+       Reports strobe_api_available so the UI can surface whether the API responded. */
+    if (strcmp(method, "POST") == 0 && ROUTE("/test_strobe")) {
+        cJSON *j = cJSON_Parse(body_buf);
+        int team_id = 0;
+        if (j) {
+            cJSON *v = cJSON_GetObjectItem(j, "team_id");
+            if (cJSON_IsNumber(v))      team_id = (int)v->valuedouble;
+            else if (cJSON_IsString(v)) team_id = atoi(v->valuestring);
+            cJSON_Delete(j);
+        }
+
+        pthread_mutex_lock(&g_app.lock);
+        int api_avail = g_app.strobe_api_available;
+        int se        = g_app.strobe_enabled;
+        /* Find matching team index; fall back to first team */
+        int tidx = (g_app.num_teams > 0) ? 0 : -1;
+        for (int i = 0; i < g_app.num_teams; i++) {
+            if (g_app.teams[i].team_id == team_id) { tidx = i; break; }
+        }
+        const char *accent = NULL;
+        const char *mapped = NULL;
+        char accent_buf[16] = "", mapped_buf[16] = "";
+        if (tidx >= 0) {
+            const MlbTeam *mt = team_by_id(g_app.teams[tidx].team_id);
+            if (mt) {
+                accent = mt->strobe;
+                mapped = closest_strobe_color(mt->strobe);
+                strncpy(accent_buf, accent, sizeof(accent_buf)-1);
+                strncpy(mapped_buf, mapped, sizeof(mapped_buf)-1);
+            }
+        }
+        pthread_mutex_unlock(&g_app.lock);
+
+        if (tidx >= 0) trigger_strobe(tidx);
+
+        char out[512];
+        snprintf(out, sizeof(out),
+            "{\"message\":\"%s\","
+            "\"strobe_api_available\":%s,"
+            "\"strobe_enabled\":%s,"
+            "\"accent_color\":\"%s\","
+            "\"mapped_color\":\"%s\","
+            "\"palette_colors\":%d}",
+            tidx < 0 ? "No teams configured" :
+            (!api_avail ? "API not available on this device" :
+             (!se ? "Strobe is disabled in settings" : "Strobe triggered")),
+            api_avail ? "true" : "false",
+            se        ? "true" : "false",
+            accent_buf,
+            mapped_buf,
+            g_app.num_strobe_colors);
+        http_respond(fd, 200, "application/json", out);
+        return;
+    }
+
     /* ── POST /test_audio ── */
     /* Accepts optional {"team_id": N} body to play that team's notify clip */
     if (strcmp(method, "POST") == 0 && ROUTE("/test_audio")) {
