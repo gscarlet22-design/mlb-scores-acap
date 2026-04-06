@@ -451,6 +451,7 @@
                     document.getElementById('device-user').value     = d.device_user || 'root';
                     document.getElementById('disp-enabled').checked  = (d.display_enabled || 'true').toLowerCase() === 'true';
                     document.getElementById('persist-final').checked = (d.display_persist_final || 'true').toLowerCase() === 'true';
+                    document.getElementById('strobe-enabled').checked = d.strobe_enabled !== false && d.strobe_enabled !== 0;
                     var vol = parseInt(d.audio_volume) || 75;
                     document.getElementById('audio-volume').value     = vol;
                     document.getElementById('audio-volume-val').textContent = vol;
@@ -509,6 +510,7 @@
             audio_volume:          document.getElementById('audio-volume').value,
             display_enabled:       document.getElementById('disp-enabled').checked ? 'true' : 'false',
             display_persist_final: document.getElementById('persist-final').checked ? 'true' : 'false',
+            strobe_enabled:        document.getElementById('strobe-enabled').checked,
             teams: configTeams.map(function (tc) {
                 return {
                     team_id:        String(tc.team_id),
