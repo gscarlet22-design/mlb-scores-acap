@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <limits.h>
 
 #include <curl/curl.h>
 #include "cJSON.h"
@@ -51,38 +52,39 @@
 #define MAX_BUF             (512 * 1024)
 
 /* ── MLB team lookup table ──────────────────────────────────────── */
-typedef struct { int id; const char *name; const char *abbr; const char *bg; const char *fg; } MlbTeam;
+typedef struct { int id; const char *name; const char *abbr; const char *bg; const char *fg; const char *strobe; } MlbTeam;
 static const MlbTeam MLB_TEAMS[] = {
-    {108, "Angels",          "LAA",  "#BA0021",  "#C4CED4"},
-    {109, "Diamondbacks",    "ARI",  "#A71930",  "#E3D4AD"},
-    {110, "Orioles",         "BAL",  "#DF4601",  "#000000"},
-    {111, "Red Sox",         "BOS",  "#BD3039",  "#0D2B56"},
-    {112, "Cubs",            "CHC",  "#0E3386",  "#CC3433"},
-    {113, "Reds",            "CIN",  "#C6011F",  "#FFFFFF"},
-    {114, "Guardians",       "CLE",  "#00385D",  "#E31937"},
-    {115, "Rockies",         "COL",  "#333366",  "#C4CED4"},
-    {116, "Tigers",          "DET",  "#0C2340",  "#FA4616"},
-    {117, "Astros",          "HOU",  "#002D62",  "#EB6E1F"},
-    {118, "Royals",          "KC",   "#004687",  "#C09A5B"},
-    {119, "Dodgers",         "LAD",  "#005A9C",  "#FFFFFF"},
-    {120, "Nationals",       "WSH",  "#AB0003",  "#14225A"},
-    {121, "Mets",            "NYM",  "#002D72",  "#FF5910"},
-    {133, "Athletics",       "OAK",  "#003831",  "#EFB21E"},
-    {134, "Pirates",         "PIT",  "#27251F",  "#FDB827"},
-    {135, "Padres",          "SD",   "#2F241D",  "#FFC425"},
-    {136, "Mariners",        "SEA",  "#0C2C56",  "#005C5C"},
-    {137, "Giants",          "SF",   "#FD5A1E",  "#27251F"},
-    {138, "Cardinals",       "STL",  "#C41E3A",  "#FEDB00"},
-    {139, "Rays",            "TB",   "#092C5C",  "#8FBCE6"},
-    {140, "Rangers",         "TEX",  "#003278",  "#C0111F"},
-    {141, "Blue Jays",       "TOR",  "#134A8E",  "#E8291C"},
-    {142, "Twins",           "MIN",  "#002B5C",  "#D31145"},
-    {143, "Phillies",        "PHI",  "#E81828",  "#002D72"},
-    {144, "Braves",          "ATL",  "#CE1141",  "#13274F"},
-    {145, "White Sox",       "CWS",  "#27251F",  "#C4CED4"},
-    {146, "Marlins",         "MIA",  "#00A3E0",  "#EF3340"},
-    {147, "Yankees",         "NYY",  "#0C2340",  "#C4CED4"},
-    {158, "Brewers",         "MIL",  "#FFC52F",  "#12284B"},
+    /* id   name             abbr   bg         fg         strobe (third/accent color) */
+    {108, "Angels",          "LAA", "#BA0021", "#C4CED4", "#B9975B"},  /* Vegas Gold  */
+    {109, "Diamondbacks",    "ARI", "#A71930", "#E3D4AD", "#000000"},  /* Black       */
+    {110, "Orioles",         "BAL", "#DF4601", "#000000", "#FFFFFF"},  /* White       */
+    {111, "Red Sox",         "BOS", "#BD3039", "#0D2B56", "#FFFFFF"},  /* White       */
+    {112, "Cubs",            "CHC", "#0E3386", "#CC3433", "#FFFFFF"},  /* White       */
+    {113, "Reds",            "CIN", "#C6011F", "#FFFFFF", "#000000"},  /* Black       */
+    {114, "Guardians",       "CLE", "#00385D", "#E31937", "#FFFFFF"},  /* White       */
+    {115, "Rockies",         "COL", "#333366", "#C4CED4", "#000000"},  /* Black       */
+    {116, "Tigers",          "DET", "#0C2340", "#FA4616", "#FFFFFF"},  /* White       */
+    {117, "Astros",          "HOU", "#002D62", "#EB6E1F", "#C4CED4"},  /* Space Gray  */
+    {118, "Royals",          "KC",  "#004687", "#C09A5B", "#FFFFFF"},  /* White       */
+    {119, "Dodgers",         "LAD", "#005A9C", "#FFFFFF", "#A5ACAF"},  /* Gray        */
+    {120, "Nationals",       "WSH", "#AB0003", "#14225A", "#B7A564"},  /* Gold        */
+    {121, "Mets",            "NYM", "#002D72", "#FF5910", "#FFFFFF"},  /* White       */
+    {133, "Athletics",       "OAK", "#003831", "#EFB21E", "#FFFFFF"},  /* White       */
+    {134, "Pirates",         "PIT", "#27251F", "#FDB827", "#FFFFFF"},  /* White       */
+    {135, "Padres",          "SD",  "#2F241D", "#FFC425", "#002D62"},  /* Navy        */
+    {136, "Mariners",        "SEA", "#0C2C56", "#005C5C", "#C4CED4"},  /* Silver      */
+    {137, "Giants",          "SF",  "#FD5A1E", "#27251F", "#EDE0C4"},  /* Cream       */
+    {138, "Cardinals",       "STL", "#C41E3A", "#FEDB00", "#14225A"},  /* Navy        */
+    {139, "Rays",            "TB",  "#092C5C", "#8FBCE6", "#F5D130"},  /* Gold        */
+    {140, "Rangers",         "TEX", "#003278", "#C0111F", "#FFFFFF"},  /* White       */
+    {141, "Blue Jays",       "TOR", "#134A8E", "#E8291C", "#FFFFFF"},  /* White       */
+    {142, "Twins",           "MIN", "#002B5C", "#D31145", "#CBA141"},  /* Gold        */
+    {143, "Phillies",        "PHI", "#E81828", "#002D72", "#FFFFFF"},  /* White       */
+    {144, "Braves",          "ATL", "#CE1141", "#13274F", "#EAAA00"},  /* Gold        */
+    {145, "White Sox",       "CWS", "#27251F", "#C4CED4", "#FFFFFF"},  /* White       */
+    {146, "Marlins",         "MIA", "#00A3E0", "#EF3340", "#FFD400"},  /* Yellow      */
+    {147, "Yankees",         "NYY", "#0C2340", "#C4CED4", "#FFFFFF"},  /* White       */
+    {158, "Brewers",         "MIL", "#FFC52F", "#12284B", "#FFFFFF"},  /* White       */
 };
 #define NUM_MLB_TEAMS (int)(sizeof(MLB_TEAMS) / sizeof(MLB_TEAMS[0]))
 
@@ -176,6 +178,12 @@ typedef struct {
     int  display_enabled;
     int  display_persist_final;
     int  audio_volume;          /* 0–100, applies to AudioOutput.A0.Volume */
+    int  strobe_enabled;        /* 1 = flash strobe on run scored */
+
+    /* Siren & Light API state (populated by init_strobe at startup) */
+    int  strobe_api_available;
+    int  num_strobe_colors;     /* 0 = full RGB; >0 = fixed palette */
+    char strobe_colors[16][16]; /* palette from getCapabilities */
 
     pthread_mutex_t lock;
     AXParameter    *ax_params;
@@ -192,6 +200,9 @@ static AppState g_app = {
     .display_enabled     = 1,
     .display_persist_final = 1,
     .audio_volume        = 75,
+    .strobe_enabled      = 1,
+    .strobe_api_available = 0,
+    .num_strobe_colors   = 0,
     .running             = 1,
 };
 
@@ -477,6 +488,192 @@ static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
 }
 
 static void play_clip(int clip_id) { play_clip_ex(clip_id, NULL, 0); }
+
+/* ── Strobe / Siren-and-Light support ───────────────────────────── */
+
+static void hex_to_rgb(const char *hex, int *r, int *g, int *b) {
+    const char *h = (hex && hex[0] == '#') ? hex + 1 : (hex ? hex : "000000");
+    unsigned rv = 0, gv = 0, bv = 0;
+    sscanf(h, "%2x%2x%2x", &rv, &gv, &bv);
+    *r = (int)rv; *g = (int)gv; *b = (int)bv;
+}
+
+/* Returns pointer to the nearest palette entry, or hex itself if palette is empty */
+static const char *closest_strobe_color(const char *hex) {
+    if (g_app.num_strobe_colors == 0) return hex;   /* full RGB device */
+    int r, g, b;
+    hex_to_rgb(hex, &r, &g, &b);
+    int best_dist = INT_MAX, best = 0;
+    for (int i = 0; i < g_app.num_strobe_colors; i++) {
+        int cr, cg, cb;
+        hex_to_rgb(g_app.strobe_colors[i], &cr, &cg, &cb);
+        int d = (r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb);
+        if (d < best_dist) { best_dist = d; best = i; }
+    }
+    return g_app.strobe_colors[best];
+}
+
+/* Called once at startup (before threads launch) to probe siren_and_light.cgi */
+static void init_strobe(void) {
+    char cred[128];
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    const char *body = "{\"apiVersion\":\"1.0\",\"method\":\"getCapabilities\"}";
+    CURL *c = curl_easy_init();
+    if (!c) return;
+
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    CurlBuf buf = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/siren_and_light.cgi");
+    curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS,    body);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,       5L);
+
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdrs);
+
+    if (rc != CURLE_OK || http_code < 200 || http_code >= 300) {
+        app_log("init_strobe: siren_and_light not available (http=%ld rc=%d) — strobe disabled",
+                http_code, (int)rc);
+        free(buf.data);
+        return;
+    }
+
+    g_app.strobe_api_available = 1;
+    g_app.num_strobe_colors    = 0;
+
+    /* Parse optional fixed color palette from capabilities response */
+    if (buf.data) {
+        cJSON *root = cJSON_Parse(buf.data);
+        if (root) {
+            cJSON *data   = cJSON_GetObjectItem(root, "data");
+            cJSON *lights = data ? cJSON_GetObjectItem(data, "lights") : NULL;
+            if (cJSON_IsArray(lights)) {
+                cJSON *light0  = cJSON_GetArrayItem(lights, 0);
+                cJSON *colors  = light0 ? cJSON_GetObjectItem(light0, "colors") : NULL;
+                if (cJSON_IsArray(colors)) {
+                    int nc = cJSON_GetArraySize(colors);
+                    if (nc > 16) nc = 16;
+                    for (int i = 0; i < nc; i++) {
+                        cJSON *col = cJSON_GetArrayItem(colors, i);
+                        if (cJSON_IsString(col)) {
+                            strncpy(g_app.strobe_colors[g_app.num_strobe_colors],
+                                    col->valuestring, 15);
+                            g_app.strobe_colors[g_app.num_strobe_colors][15] = '\0';
+                            g_app.num_strobe_colors++;
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(root);
+        }
+        free(buf.data);
+    }
+
+    app_log("init_strobe: API available, palette colors=%d (0=full RGB)",
+            g_app.num_strobe_colors);
+}
+
+typedef struct { char color[16]; } StrobeArg;
+
+static void *trigger_strobe_thread(void *arg) {
+    StrobeArg *sa = (StrobeArg *)arg;
+    char color[16];
+    strncpy(color, sa->color, sizeof(color)-1);
+    color[sizeof(color)-1] = '\0';
+    free(sa);
+
+    char cred[128];
+    pthread_mutex_lock(&g_app.lock);
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+    pthread_mutex_unlock(&g_app.lock);
+
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    CURL *c = curl_easy_init();
+    if (!c) { curl_slist_free_all(hdrs); return NULL; }
+
+    CurlBuf buf = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/siren_and_light.cgi");
+    curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,       5L);
+
+    /* Try updateProfile first; fall back to addProfile if not found */
+    char prof_body[640];
+    snprintf(prof_body, sizeof(prof_body),
+        "{\"apiVersion\":\"1.0\",\"method\":\"updateProfile\","
+        "\"params\":{\"profile\":{"
+        "\"name\":\"mlb_scores\","
+        "\"lights\":[{\"id\":\"0\",\"color\":\"%s\",\"intensity\":100}],"
+        "\"pattern\":\"pulsing\",\"speed\":5,"
+        "\"duration\":{\"forever\":false,\"time\":5000}}}}",
+        color);
+    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, prof_body);
+    curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    free(buf.data); buf.data = NULL; buf.len = 0;
+    app_log("strobe updateProfile http=%ld color=%s", http_code, color);
+
+    if (http_code >= 400 || http_code < 200) {
+        char add_body[640];
+        snprintf(add_body, sizeof(add_body),
+            "{\"apiVersion\":\"1.0\",\"method\":\"addProfile\","
+            "\"params\":{\"profile\":{"
+            "\"name\":\"mlb_scores\","
+            "\"lights\":[{\"id\":\"0\",\"color\":\"%s\",\"intensity\":100}],"
+            "\"pattern\":\"pulsing\",\"speed\":5,"
+            "\"duration\":{\"forever\":false,\"time\":5000}}}}",
+            color);
+        curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, add_body);
+        curl_easy_perform(c);
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+        free(buf.data); buf.data = NULL; buf.len = 0;
+        app_log("strobe addProfile http=%ld", http_code);
+    }
+
+    /* Start the profile */
+    const char *start_body =
+        "{\"apiVersion\":\"1.0\",\"method\":\"start\","
+        "\"params\":{\"profile\":\"mlb_scores\"}}";
+    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, start_body);
+    curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    app_log("strobe start http=%ld", http_code);
+    free(buf.data);
+
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdrs);
+    return NULL;
+}
+
+static void trigger_strobe(int team_idx) {
+    if (!g_app.strobe_api_available || !g_app.strobe_enabled) return;
+    const MlbTeam *mt = team_by_id(g_app.teams[team_idx].team_id);
+    if (!mt) return;
+    const char *color = closest_strobe_color(mt->strobe);
+
+    StrobeArg *sa = malloc(sizeof(StrobeArg));
+    if (!sa) return;
+    strncpy(sa->color, color, sizeof(sa->color)-1);
+    sa->color[sizeof(sa->color)-1] = '\0';
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, trigger_strobe_thread, sa) == 0)
+        pthread_detach(t);
+    else
+        free(sa);
+}
 
 /* ── Date helpers ────────────────────────────────────────────────── */
 static void today_str(char *buf, size_t n) {
@@ -1071,6 +1268,10 @@ static void poll_one_team(int idx) {
                 play_clip(cfg->notify_clip_id);
             }
         }
+
+        /* Strobe: flash team accent color on run scored only */
+        if (my_scored)
+            trigger_strobe(idx);
     }
 
     /* ── Final: show once, then enter persist loop ── */
@@ -1212,6 +1413,7 @@ static void handle_request(int fd) {
             char tmp[16]; snprintf(tmp, sizeof(tmp), "%d", g_app.audio_volume);
             cJSON_AddStringToObject(root, "audio_volume", tmp);
         }
+        cJSON_AddBoolToObject(root, "strobe_enabled", g_app.strobe_enabled);
 
         /* teams array — includes per-team display settings */
         cJSON *tarr = cJSON_AddArrayToObject(root, "teams");
@@ -1267,6 +1469,10 @@ static void handle_request(int fd) {
             SET_INT_STR("audio_volume",          audio_volume)
             if (g_app.audio_volume < 0)   g_app.audio_volume = 0;
             if (g_app.audio_volume > 100) g_app.audio_volume = 100;
+            SET_BOOL_STR("strobe_enabled",       strobe_enabled)
+            /* also accept raw bool from JS */
+            if ((v = cJSON_GetObjectItem(j, "strobe_enabled")) && cJSON_IsBool(v))
+                g_app.strobe_enabled = cJSON_IsTrue(v) ? 1 : 0;
             SET_STR("device_user",               device_user)
             if ((v = cJSON_GetObjectItem(j, "device_pass")) && cJSON_IsString(v) && strlen(v->valuestring))
                 strncpy(g_app.device_pass, v->valuestring, sizeof(g_app.device_pass)-1);
@@ -1288,6 +1494,7 @@ static void handle_request(int fd) {
                 AXSET("DisplayPersistFinal", g_app.display_persist_final ? "true" : "false");
                 snprintf(tmp, sizeof(tmp), "%d", g_app.audio_volume);
                 AXSET("AudioVolume",         tmp);
+                AXSET("StrobeEnabled",       g_app.strobe_enabled ? "true" : "false");
                 AXSET("DeviceUser",          g_app.device_user);
                 if (strlen(g_app.device_pass))
                     AXSET("DevicePass",      g_app.device_pass);
@@ -1611,8 +1818,9 @@ static void handle_request(int fd) {
             cJSON_AddNumberToObject(t, "id",   MLB_TEAMS[i].id);
             cJSON_AddStringToObject(t, "name", MLB_TEAMS[i].name);
             cJSON_AddStringToObject(t, "abbr", MLB_TEAMS[i].abbr);
-            cJSON_AddStringToObject(t, "bg",   MLB_TEAMS[i].bg);
-            cJSON_AddStringToObject(t, "fg",   MLB_TEAMS[i].fg);
+            cJSON_AddStringToObject(t, "bg",     MLB_TEAMS[i].bg);
+            cJSON_AddStringToObject(t, "fg",     MLB_TEAMS[i].fg);
+            cJSON_AddStringToObject(t, "strobe", MLB_TEAMS[i].strobe);
             cJSON_AddItemToArray(arr, t);
         }
         char *out = cJSON_PrintUnformatted(root);
@@ -1805,6 +2013,7 @@ static void load_params(void) {
     GETBOOL("DisplayEnabled",     display_enabled)
     GETBOOL("DisplayPersistFinal",display_persist_final)
     GETINT("AudioVolume",         audio_volume)
+    GETBOOL("StrobeEnabled",      strobe_enabled)
     GETSTR("DeviceUser",          device_user)
     GETSTR("DevicePass",          device_pass)
 
@@ -1854,7 +2063,7 @@ static void load_params(void) {
 
 /* ── Entry point ─────────────────────────────────────────────────── */
 int main(void) {
-    app_log("starting v1.1.1");
+    app_log("starting v1.1.10");
 
     curl_global_init(CURL_GLOBAL_ALL);
     pthread_mutex_init(&g_app.lock, NULL);
@@ -1874,6 +2083,9 @@ int main(void) {
         load_params();
 
     g_app.fetch_curl = curl_easy_init();
+
+    /* Probe siren_and_light.cgi — sets strobe_api_available and color palette */
+    init_strobe();
 
     app_log("running: port=%d teams=%d poll=%ds",
             HTTP_PORT, g_app.num_teams, g_app.poll_interval_sec);
