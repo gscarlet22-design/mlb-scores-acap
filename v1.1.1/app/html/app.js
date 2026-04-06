@@ -712,4 +712,34 @@
         api('/test_display', { method: 'POST' }).catch(function () {});
     });
 
+    /* ── Test strobe ── */
+    document.getElementById('btn-test-strobe').addEventListener('click', function () {
+        var btn = this;
+        var out = document.getElementById('strobe-test-out');
+        btn.disabled = true;
+        btn.textContent = 'Firing…';
+        out.textContent = '';
+        var teamId = configTeams.length > 0 ? configTeams[0].team_id : 0;
+        api('/test_strobe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ team_id: teamId }),
+        }).then(function (r) { return r.json(); }).then(function (d) {
+            var lines = [
+                'Result: ' + d.message,
+                'API available: ' + d.strobe_api_available,
+                'Strobe enabled: ' + d.strobe_enabled,
+                'Accent color:  ' + d.accent_color,
+                'Mapped color:  ' + d.mapped_color,
+                'Palette size:  ' + d.palette_colors + (d.palette_colors === 0 ? ' (full RGB)' : ' fixed colors'),
+            ];
+            out.textContent = lines.join('\n');
+        }).catch(function (e) {
+            out.textContent = 'Request failed: ' + e;
+        }).finally(function () {
+            btn.disabled = false;
+            btn.textContent = 'Test Strobe';
+        });
+    });
+
 })();
