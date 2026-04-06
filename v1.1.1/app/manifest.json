@@ -7,7 +7,7 @@
             "vendor": "gscarlet22 design",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "1.1.11",
+            "version": "1.1.12",
             "user": {
                 "username": "sdk",
                 "group": "sdk"
@@ -72,6 +72,16 @@
                 {
                     "name": "ScoreClipId",
                     "default": "38",
+                    "type": "String"
+                },
+                {
+                    "name": "AudioVolume",
+                    "default": "75",
+                    "type": "String"
+                },
+                {
+                    "name": "StrobeEnabled",
+                    "default": "true",
                     "type": "String"
                 }
             ]
