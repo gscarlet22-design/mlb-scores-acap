@@ -182,8 +182,10 @@ typedef struct {
 
     /* Siren & Light API state (populated by init_strobe at startup) */
     int  strobe_api_available;
-    int  num_strobe_colors;     /* 0 = full RGB; >0 = fixed palette */
-    char strobe_colors[16][16]; /* palette from getCapabilities */
+    int  num_strobe_palette;        /* named colors confirmed on device */
+    char strobe_palette[5][16];     /* e.g. "red", "amber", "blue" */
+    char strobe_pattern[32];        /* best single-color pattern e.g. "Pulse" */
+    int  strobe_intensity;          /* default intensity from capabilities */
 
     pthread_mutex_t lock;
     AXParameter    *ax_params;
@@ -200,9 +202,10 @@ static AppState g_app = {
     .display_enabled     = 1,
     .display_persist_final = 1,
     .audio_volume        = 75,
-    .strobe_enabled      = 1,
+    .strobe_enabled       = 1,
     .strobe_api_available = 0,
-    .num_strobe_colors   = 0,
+    .num_strobe_palette   = 0,
+    .strobe_intensity     = 3,
     .running             = 1,
 };
 
@@ -378,33 +381,172 @@ static long display_show_ex(const char *message, const TeamConfig *cfg,
     return (rc == CURLE_OK) ? http_code : -1;
 }
 
-/* ── Audio Device Control: set output gain (dB) ─────────────────── */
-/* Gain range on C1720 internal output: -95 dB (mute) to 0 dB (max).
-   This call is synchronous — caller spawns a restore thread as needed. */
-static void set_output_gain(int gain_db) {
-    if (gain_db > 0)   gain_db = 0;
-    if (gain_db < -95) gain_db = -95;
+/* ── G.711 µ-law encode / decode ─────────────────────────────────── */
+/* Used to volume-scale downloaded .au clips before streaming to transmit.cgi */
 
+static int16_t ulaw_decode(uint8_t u) {
+    u = ~u;
+    int sign     = (u & 0x80) ? -1 : 1;
+    int exponent = (u >> 4) & 0x07;
+    int mantissa =  u & 0x0F;
+    int magnitude = ((mantissa << 1) | 1) << exponent;
+    return (int16_t)(sign * (magnitude - 1));
+}
+
+static uint8_t ulaw_encode(int16_t s) {
+    int sign = (s >= 0) ? 0x80 : 0x00;
+    int v = (s < 0) ? -(int)s : (int)s;
+    v += 33;
+    if (v > 0x1FFF) v = 0x1FFF;
+    int exp = 7;
+    for (int mask = 0x1000; (v & mask) == 0 && exp > 0; exp--, mask >>= 1);
+    int mant = (v >> (exp + 1)) & 0x0F;
+    return (uint8_t)(~(sign | (exp << 4) | mant));
+}
+
+/* ── .au header parser ───────────────────────────────────────────── */
+/* Returns byte offset to audio data, or -1 on error.
+   Sets *encoding (1 = µ-law), *sample_rate, *channels. */
+static int au_parse_header(const uint8_t *d, size_t len,
+                            uint32_t *encoding, uint32_t *sample_rate,
+                            uint32_t *channels) {
+    if (len < 24) return -1;
+    uint32_t magic  = ((uint32_t)d[0]<<24)|((uint32_t)d[1]<<16)|
+                      ((uint32_t)d[2]<<8)|d[3];
+    if (magic != 0x2E736E64u) return -1;   /* ".snd" */
+    uint32_t offset = ((uint32_t)d[4]<<24)|((uint32_t)d[5]<<16)|
+                      ((uint32_t)d[6]<<8)|d[7];
+    if (encoding)    *encoding    = ((uint32_t)d[12]<<24)|((uint32_t)d[13]<<16)|
+                                    ((uint32_t)d[14]<<8)|d[15];
+    if (sample_rate) *sample_rate = ((uint32_t)d[16]<<24)|((uint32_t)d[17]<<16)|
+                                    ((uint32_t)d[18]<<8)|d[19];
+    if (channels)    *channels    = ((uint32_t)d[20]<<24)|((uint32_t)d[21]<<16)|
+                                    ((uint32_t)d[22]<<8)|d[23];
+    return (offset < len) ? (int)offset : -1;
+}
+
+/* ── Download a stored clip as .au ──────────────────────────────── */
+static int download_au_clip(int clip_id, uint8_t **out, size_t *out_len) {
+    char url[MAX_URL], cred[128];
+    snprintf(url,  sizeof(url),  "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=download&clip=%d", clip_id);
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+
+    CURL *c = curl_easy_init();
+    if (!c) return 0;
+    CurlBuf buf = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL,           url);
+    curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,       10L);
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+
+    if (rc != CURLE_OK || http_code != 200 || !buf.data || buf.len < 24) {
+        app_log("download_au_clip id=%d failed http=%ld rc=%d len=%zu",
+                clip_id, http_code, (int)rc, buf.len);
+        free(buf.data);
+        return 0;
+    }
+    *out     = (uint8_t *)buf.data;
+    *out_len = buf.len;
+    return 1;
+}
+
+/* ── Download, volume-scale, and stream a clip via transmit.cgi ──── */
+/* Returns 1 on success, 0 on failure (caller falls back to mediaclip play). */
+static int stream_scaled_clip(int clip_id, int volume_pct) {
+    uint8_t *au = NULL;
+    size_t   au_len = 0;
+    if (!download_au_clip(clip_id, &au, &au_len)) return 0;
+
+    uint32_t encoding = 0, sample_rate = 8000, channels = 1;
+    int data_off = au_parse_header(au, au_len, &encoding, &sample_rate, &channels);
+    if (data_off < 0 || encoding != 1) {
+        app_log("stream_scaled_clip: unsupported .au encoding=%u offset=%d", encoding, data_off);
+        free(au);
+        return 0;
+    }
+
+    const uint8_t *src = au + data_off;
+    size_t n = au_len - (size_t)data_off;
+
+    /* Decode µ-law → scale → re-encode */
+    uint8_t *scaled = malloc(n);
+    if (!scaled) { free(au); return 0; }
+
+    float gain = (float)volume_pct / 100.0f;
+    for (size_t i = 0; i < n; i++) {
+        int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
+        if (s >  32767) s =  32767;
+        if (s < -32768) s = -32768;
+        scaled[i] = ulaw_encode((int16_t)s);
+    }
+    free(au);
+
+    /* Stream scaled µ-law to transmit.cgi as audio/basic */
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
 
-    char body[384];
-    snprintf(body, sizeof(body),
-        "{\"apiVersion\":\"1.0\",\"method\":\"setDevicesSettings\","
-        "\"params\":{\"devices\":[{\"id\":\"0\",\"outputs\":[{\"id\":\"0\","
-        "\"connectionType\":{\"id\":\"internal\","
-        "\"signalingType\":{\"id\":\"unbalanced\",\"gain\":%d}}}]}]}}",
-        gain_db);
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: audio/basic");
+    CURL *c = curl_easy_init();
+    if (!c) { free(scaled); curl_slist_free_all(hdrs); return 0; }
+
+    CurlBuf resp = {NULL, 0};
+    curl_easy_setopt(c, CURLOPT_URL,            "http://127.0.0.1/axis-cgi/audio/transmit.cgi");
+    curl_easy_setopt(c, CURLOPT_USERPWD,        cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,       CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,     hdrs);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS,     (char *)scaled);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE,  (long)n);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,  curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,      &resp);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,        30L);
+
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = -1;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    app_log("stream_scaled_clip id=%d vol=%d%% n=%zu http=%ld rc=%d resp=%s",
+            clip_id, volume_pct, n, http_code, (int)rc,
+            resp.data ? resp.data : "(none)");
+    free(resp.data);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(c);
+    free(scaled);
+    return (rc == CURLE_OK && http_code >= 200 && http_code < 300) ? 1 : 0;
+}
+
+/* ── VAPIX audio clip playback ───────────────────────────────────── */
+/* Primary: download .au → scale µ-law → stream via transmit.cgi (volume-aware,
+   device output gain never touched). Falls back to mediaclip play on failure. */
+static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
+    int vol = g_app.audio_volume;
+    if (vol < 0) vol = 0; if (vol > 100) vol = 100;
+
+    if (stream_scaled_clip(clip_id, vol)) {
+        if (resp_out) snprintf(resp_out, resp_sz,
+            "streamed clip=%d vol=%d%% via transmit.cgi", clip_id, vol);
+        return 200;
+    }
+
+    /* Fallback: play via mediaclip.cgi without volume control */
+    app_log("play_clip_ex: stream failed, falling back to mediaclip play id=%d", clip_id);
+    char url[MAX_URL], cred[128];
+    snprintf(url,  sizeof(url),  MEDIACLIP_API, clip_id);
+    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
 
     CURL *c = curl_easy_init();
-    if (!c) return;
-    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    if (!c) {
+        if (resp_out) snprintf(resp_out, resp_sz, "curl_easy_init failed");
+        return -1;
+    }
     CurlBuf buf = {NULL, 0};
-    curl_easy_setopt(c, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
+    curl_easy_setopt(c, CURLOPT_URL,           url);
     curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
     curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
-    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
-    curl_easy_setopt(c, CURLOPT_POSTFIELDS,    body);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
     curl_easy_setopt(c, CURLOPT_TIMEOUT,       5L);
@@ -412,76 +554,14 @@ static void set_output_gain(int gain_db) {
     long http_code = -1;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(c);
-    curl_slist_free_all(hdrs);
-    app_log("set_output_gain db=%d http=%ld rc=%d resp=%s",
-            gain_db, http_code, rc, buf.data ? buf.data : "(none)");
-    free(buf.data);
-}
-
-/* Detached thread: sleep delay_sec then restore gain to 0 dB (max).
-   Ensures emergency announcements return to full volume after a clip. */
-typedef struct { int delay_sec; } RestoreGainArg;
-static void *restore_gain_thread(void *arg) {
-    RestoreGainArg *ra = arg;
-    sleep((unsigned int)ra->delay_sec);
-    free(ra);
-    set_output_gain(0);   /* restore to max */
-    return NULL;
-}
-
-#define CLIP_RESTORE_SEC 20   /* seconds before gain is restored to 0 dB */
-
-/* ── VAPIX audio clip playback ───────────────────────────────────── */
-static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
-    /* Map 0-100% slider to -95..0 dB: 0% → -95 dB, 100% → 0 dB (linear in dB). */
-    int vol = g_app.audio_volume;
-    if (vol < 0) vol = 0; if (vol > 100) vol = 100;
-    int gain_db = -95 + (vol * 95 / 100);
-    set_output_gain(gain_db);
-
-    /* Spawn a detached thread to restore gain to 0 dB after the clip finishes */
-    RestoreGainArg *ra = malloc(sizeof(RestoreGainArg));
-    if (ra) {
-        ra->delay_sec = CLIP_RESTORE_SEC;
-        pthread_t t;
-        if (pthread_create(&t, NULL, restore_gain_thread, ra) == 0)
-            pthread_detach(t);
-        else
-            free(ra);
-    }
-
-    char url[MAX_URL];
-    snprintf(url, sizeof(url), MEDIACLIP_API, clip_id);
-
-    CURL *c = curl_easy_init();
-    if (!c) {
-        if (resp_out) snprintf(resp_out, resp_sz, "curl_easy_init failed");
-        return -1;
-    }
-    char cred[128];
-    snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
-
-    CurlBuf buf = {NULL, 0};
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERPWD, cred);
-    curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
-
-    CURLcode rc = curl_easy_perform(c);
-    long http_code = -1;
-    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(c);
-
     if (rc != CURLE_OK) {
-        app_log("play_clip curl error: %s", curl_easy_strerror(rc));
-        if (resp_out) snprintf(resp_out, resp_sz, "curl error: %s", curl_easy_strerror(rc));
-    } else {
-        app_log("play_clip id=%d http=%ld body=%s", clip_id, http_code,
-                buf.data ? buf.data : "(empty)");
+        app_log("play_clip fallback error: %s", curl_easy_strerror(rc));
         if (resp_out) snprintf(resp_out, resp_sz,
-            "http=%ld body=%s", http_code, buf.data ? buf.data : "(empty)");
+            "fallback curl error: %s", curl_easy_strerror(rc));
+    } else {
+        app_log("play_clip fallback id=%d http=%ld", clip_id, http_code);
+        if (resp_out) snprintf(resp_out, resp_sz,
+            "fallback http=%ld body=%s", http_code, buf.data ? buf.data : "(empty)");
     }
     free(buf.data);
     return (rc == CURLE_OK) ? http_code : -1;
@@ -491,6 +571,16 @@ static void play_clip(int clip_id) { play_clip_ex(clip_id, NULL, 0); }
 
 /* ── Strobe / Siren-and-Light support ───────────────────────────── */
 
+/* Known named-color palette with approximate RGB for nearest-match mapping */
+static const struct { const char *name; int r, g, b; } STROBE_NAMED[] = {
+    { "red",   255,   0,   0 },
+    { "green",   0, 255,   0 },
+    { "blue",    0,   0, 255 },
+    { "amber", 255, 191,   0 },
+    { "white", 255, 255, 255 },
+};
+#define STROBE_NAMED_SZ (int)(sizeof(STROBE_NAMED)/sizeof(STROBE_NAMED[0]))
+
 static void hex_to_rgb(const char *hex, int *r, int *g, int *b) {
     const char *h = (hex && hex[0] == '#') ? hex + 1 : (hex ? hex : "000000");
     unsigned rv = 0, gv = 0, bv = 0;
@@ -498,22 +588,34 @@ static void hex_to_rgb(const char *hex, int *r, int *g, int *b) {
     *r = (int)rv; *g = (int)gv; *b = (int)bv;
 }
 
-/* Returns pointer to the nearest palette entry, or hex itself if palette is empty */
+/* Returns the named color string closest to the given hex.
+ * Searches device palette if populated; else uses the full hardcoded set. */
 static const char *closest_strobe_color(const char *hex) {
-    if (g_app.num_strobe_colors == 0) return hex;   /* full RGB device */
     int r, g, b;
     hex_to_rgb(hex, &r, &g, &b);
     int best_dist = INT_MAX, best = 0;
-    for (int i = 0; i < g_app.num_strobe_colors; i++) {
-        int cr, cg, cb;
-        hex_to_rgb(g_app.strobe_colors[i], &cr, &cg, &cb);
+    int n = (g_app.num_strobe_palette > 0) ? g_app.num_strobe_palette : STROBE_NAMED_SZ;
+    for (int i = 0; i < n; i++) {
+        /* Resolve name → RGB */
+        const char *name = (g_app.num_strobe_palette > 0)
+                           ? g_app.strobe_palette[i] : STROBE_NAMED[i].name;
+        int cr = 255, cg = 255, cb = 255;
+        for (int j = 0; j < STROBE_NAMED_SZ; j++) {
+            if (strcmp(STROBE_NAMED[j].name, name) == 0) {
+                cr = STROBE_NAMED[j].r;
+                cg = STROBE_NAMED[j].g;
+                cb = STROBE_NAMED[j].b;
+                break;
+            }
+        }
         int d = (r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb);
         if (d < best_dist) { best_dist = d; best = i; }
     }
-    return g_app.strobe_colors[best];
+    return (g_app.num_strobe_palette > 0)
+           ? g_app.strobe_palette[best] : STROBE_NAMED[best].name;
 }
 
-/* Called once at startup (before threads launch) to probe siren_and_light.cgi */
+/* Called once at startup to probe siren_and_light.cgi and cache capabilities */
 static void init_strobe(void) {
     char cred[128];
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -540,118 +642,119 @@ static void init_strobe(void) {
     curl_slist_free_all(hdrs);
 
     if (rc != CURLE_OK || http_code < 200 || http_code >= 300) {
-        app_log("init_strobe: siren_and_light not available (http=%ld rc=%d) — strobe disabled",
-                http_code, (int)rc);
+        app_log("init_strobe: not available (http=%ld rc=%d)", http_code, (int)rc);
         free(buf.data);
         return;
     }
 
     g_app.strobe_api_available = 1;
-    g_app.num_strobe_colors    = 0;
+    g_app.num_strobe_palette   = 0;
+    strncpy(g_app.strobe_pattern, "Steady", sizeof(g_app.strobe_pattern)-1);
+    g_app.strobe_intensity = 3;
 
-    /* Parse optional fixed color palette from capabilities response */
     if (buf.data) {
         cJSON *root = cJSON_Parse(buf.data);
         if (root) {
-            cJSON *data   = cJSON_GetObjectItem(root, "data");
-            cJSON *lights = data ? cJSON_GetObjectItem(data, "lights") : NULL;
-            if (cJSON_IsArray(lights)) {
-                cJSON *light0  = cJSON_GetArrayItem(lights, 0);
-                cJSON *colors  = light0 ? cJSON_GetObjectItem(light0, "colors") : NULL;
-                if (cJSON_IsArray(colors)) {
-                    int nc = cJSON_GetArraySize(colors);
-                    if (nc > 16) nc = 16;
-                    for (int i = 0; i < nc; i++) {
-                        cJSON *col = cJSON_GetArrayItem(colors, i);
-                        if (cJSON_IsString(col)) {
-                            strncpy(g_app.strobe_colors[g_app.num_strobe_colors],
-                                    col->valuestring, 15);
-                            g_app.strobe_colors[g_app.num_strobe_colors][15] = '\0';
-                            g_app.num_strobe_colors++;
+            /* Path: data.capabilities.light.supportedPatterns[] */
+            cJSON *data  = cJSON_GetObjectItem(root, "data");
+            cJSON *caps  = data  ? cJSON_GetObjectItem(data,  "capabilities") : NULL;
+            cJSON *light = caps  ? cJSON_GetObjectItem(caps,  "light")        : NULL;
+            cJSON *pats  = light ? cJSON_GetObjectItem(light, "supportedPatterns") : NULL;
+
+            int found_pulse = 0, found_steady = 0;
+            if (cJSON_IsArray(pats)) {
+                int np = cJSON_GetArraySize(pats);
+                for (int i = 0; i < np; i++) {
+                    cJSON *pat   = cJSON_GetArrayItem(pats, i);
+                    cJSON *pname = cJSON_GetObjectItem(pat, "name");
+                    if (!cJSON_IsString(pname)) continue;
+                    if (strcmp(pname->valuestring, "Pulse")  == 0) found_pulse  = 1;
+                    if (strcmp(pname->valuestring, "Steady") == 0) found_steady = 1;
+
+                    /* Extract color palette and default intensity from first pattern */
+                    if (g_app.num_strobe_palette == 0) {
+                        cJSON *colors   = cJSON_GetObjectItem(pat, "colors");
+                        cJSON *possible = colors ? cJSON_GetObjectItem(colors, "possible") : NULL;
+                        if (cJSON_IsArray(possible)) {
+                            int nc = cJSON_GetArraySize(possible);
+                            if (nc > 5) nc = 5;
+                            for (int j = 0; j < nc; j++) {
+                                cJSON *col = cJSON_GetArrayItem(possible, j);
+                                if (cJSON_IsString(col)) {
+                                    strncpy(g_app.strobe_palette[g_app.num_strobe_palette],
+                                            col->valuestring, 15);
+                                    g_app.strobe_palette[g_app.num_strobe_palette][15] = '\0';
+                                    g_app.num_strobe_palette++;
+                                }
+                            }
                         }
+                        /* Intensity default from poeClass "4" */
+                        cJSON *intens = cJSON_GetObjectItem(pat, "intensity");
+                        cJSON *poc    = intens ? cJSON_GetObjectItem(intens, "poeClass") : NULL;
+                        cJSON *pc4    = poc    ? cJSON_GetObjectItem(poc,    "4")        : NULL;
+                        cJSON *def    = pc4    ? cJSON_GetObjectItem(pc4,    "default")  : NULL;
+                        if (cJSON_IsNumber(def)) g_app.strobe_intensity = (int)def->valuedouble;
                     }
                 }
             }
+            if (found_pulse)        strncpy(g_app.strobe_pattern, "Pulse",  sizeof(g_app.strobe_pattern)-1);
+            else if (found_steady)  strncpy(g_app.strobe_pattern, "Steady", sizeof(g_app.strobe_pattern)-1);
             cJSON_Delete(root);
         }
         free(buf.data);
     }
-
-    app_log("init_strobe: API available, palette colors=%d (0=full RGB)",
-            g_app.num_strobe_colors);
+    app_log("init_strobe: available pattern='%s' intensity=%d palette=%d",
+            g_app.strobe_pattern, g_app.strobe_intensity, g_app.num_strobe_palette);
 }
 
 typedef struct { char color[16]; } StrobeArg;
 
+/* Ad-hoc start — no profile management needed; inline params per VAPIX spec */
 static void *trigger_strobe_thread(void *arg) {
     StrobeArg *sa = (StrobeArg *)arg;
-    char color[16];
+    char color[16], pattern[32], cred[128];
+    int  intensity;
     strncpy(color, sa->color, sizeof(color)-1);
     color[sizeof(color)-1] = '\0';
     free(sa);
 
-    char cred[128];
     pthread_mutex_lock(&g_app.lock);
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
+    strncpy(pattern, g_app.strobe_pattern, sizeof(pattern)-1);
+    intensity = g_app.strobe_intensity;
     pthread_mutex_unlock(&g_app.lock);
+
+    char body[512];
+    snprintf(body, sizeof(body),
+        "{\"apiVersion\":\"1.0\",\"method\":\"start\","
+        "\"params\":{\"light\":{"
+        "\"pattern\":\"%s\","
+        "\"speed\":2,"
+        "\"colors\":[\"%s\"],"
+        "\"intensity\":%d,"
+        "\"duration\":{\"unit\":\"seconds\",\"value\":5}}}}",
+        pattern, color, intensity);
 
     struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
     CURL *c = curl_easy_init();
     if (!c) { curl_slist_free_all(hdrs); return NULL; }
 
     CurlBuf buf = {NULL, 0};
-    curl_easy_setopt(c, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/siren_and_light.cgi");
-    curl_easy_setopt(c, CURLOPT_USERPWD,       cred);
-    curl_easy_setopt(c, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
-    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT,       5L);
+    curl_easy_setopt(c, CURLOPT_URL,            "http://127.0.0.1/axis-cgi/siren_and_light.cgi");
+    curl_easy_setopt(c, CURLOPT_USERPWD,        cred);
+    curl_easy_setopt(c, CURLOPT_HTTPAUTH,       CURLAUTH_DIGEST);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,     hdrs);
+    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, body);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,  curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,      &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,        5L);
 
-    /* Try updateProfile first; fall back to addProfile if not found */
-    char prof_body[640];
-    snprintf(prof_body, sizeof(prof_body),
-        "{\"apiVersion\":\"1.0\",\"method\":\"updateProfile\","
-        "\"params\":{\"profile\":{"
-        "\"name\":\"mlb_scores\","
-        "\"lights\":[{\"id\":\"0\",\"color\":\"%s\",\"intensity\":100}],"
-        "\"pattern\":\"pulsing\",\"speed\":5,"
-        "\"duration\":{\"forever\":false,\"time\":5000}}}}",
-        color);
-    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, prof_body);
     curl_easy_perform(c);
     long http_code = -1;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
-    free(buf.data); buf.data = NULL; buf.len = 0;
-    app_log("strobe updateProfile http=%ld color=%s", http_code, color);
-
-    if (http_code >= 400 || http_code < 200) {
-        char add_body[640];
-        snprintf(add_body, sizeof(add_body),
-            "{\"apiVersion\":\"1.0\",\"method\":\"addProfile\","
-            "\"params\":{\"profile\":{"
-            "\"name\":\"mlb_scores\","
-            "\"lights\":[{\"id\":\"0\",\"color\":\"%s\",\"intensity\":100}],"
-            "\"pattern\":\"pulsing\",\"speed\":5,"
-            "\"duration\":{\"forever\":false,\"time\":5000}}}}",
-            color);
-        curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, add_body);
-        curl_easy_perform(c);
-        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
-        free(buf.data); buf.data = NULL; buf.len = 0;
-        app_log("strobe addProfile http=%ld", http_code);
-    }
-
-    /* Start the profile */
-    const char *start_body =
-        "{\"apiVersion\":\"1.0\",\"method\":\"start\","
-        "\"params\":{\"profile\":\"mlb_scores\"}}";
-    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, start_body);
-    curl_easy_perform(c);
-    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
-    app_log("strobe start http=%ld", http_code);
+    app_log("strobe start pattern=%s color=%s intensity=%d http=%ld resp=%s",
+            pattern, color, intensity, http_code, buf.data ? buf.data : "(none)");
     free(buf.data);
-
     curl_easy_cleanup(c);
     curl_slist_free_all(hdrs);
     return NULL;
