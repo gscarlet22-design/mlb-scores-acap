@@ -1432,8 +1432,8 @@ static void http_respond(int fd, int code, const char *ctype, const char *body) 
         "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n\r\n",
         code, reason, ctype, strlen(body));
-    (void)write(fd, hdr, hlen);
-    (void)write(fd, body, strlen(body));
+    { ssize_t _w = write(fd, hdr,          hlen);          (void)_w; }
+    { ssize_t _w = write(fd, body, strlen(body)); (void)_w; }
 }
 
 static void handle_request(int fd) {
@@ -1758,22 +1758,23 @@ static void handle_request(int fd) {
         cJSON *clips_out = cJSON_CreateArray();
         for (int ci = 0; ci < nb; ci++) {
             CURL *uc = curl_easy_init();
-            struct curl_httppost *form = NULL, *last = NULL;
-            curl_formadd(&form, &last,
-                CURLFORM_COPYNAME,    "clip",
-                CURLFORM_FILE,        BUNDLED[ci].file,
-                CURLFORM_CONTENTTYPE, "audio/mpeg",
-                CURLFORM_END);
-            curl_formadd(&form, &last,
-                CURLFORM_COPYNAME,     "name",
-                CURLFORM_COPYCONTENTS, BUNDLED[ci].name,
-                CURLFORM_END);
+            curl_mime     *mime = curl_mime_init(uc);
+            curl_mimepart *part;
+
+            part = curl_mime_addpart(mime);
+            curl_mime_name(part, "clip");
+            curl_mime_filedata(part, BUNDLED[ci].file);
+            curl_mime_type(part, "audio/mpeg");
+
+            part = curl_mime_addpart(mime);
+            curl_mime_name(part, "name");
+            curl_mime_data(part, BUNDLED[ci].name, CURL_ZERO_TERMINATED);
 
             CurlBuf resp = {NULL, 0};
             curl_easy_setopt(uc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=upload");
             curl_easy_setopt(uc, CURLOPT_USERPWD,       cred);
             curl_easy_setopt(uc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
-            curl_easy_setopt(uc, CURLOPT_HTTPPOST,      form);
+            curl_easy_setopt(uc, CURLOPT_MIMEPOST,      mime);
             curl_easy_setopt(uc, CURLOPT_WRITEFUNCTION, curl_write_cb);
             curl_easy_setopt(uc, CURLOPT_WRITEDATA,     &resp);
             curl_easy_setopt(uc, CURLOPT_TIMEOUT,       30L);
@@ -1782,7 +1783,7 @@ static void handle_request(int fd) {
             long http_code = -1;
             curl_easy_getinfo(uc, CURLINFO_RESPONSE_CODE, &http_code);
             curl_easy_cleanup(uc);
-            curl_formfree(form);
+            curl_mime_free(mime);
 
             app_log("upload_clips: %s http=%ld rc=%d resp=%s",
                     BUNDLED[ci].name, http_code, rc,
@@ -1867,7 +1868,7 @@ static void handle_request(int fd) {
         curl_easy_setopt(ac, CURLOPT_WRITEFUNCTION, curl_write_cb);
         curl_easy_setopt(ac, CURLOPT_WRITEDATA,     &adc_buf);
         curl_easy_setopt(ac, CURLOPT_TIMEOUT,       5L);
-        CURLcode adc_rc = curl_easy_perform(ac);
+        CURLcode adc_rc = curl_easy_perform(ac); (void)adc_rc;
         long adc_http = -1;
         curl_easy_getinfo(ac, CURLINFO_RESPONSE_CODE, &adc_http);
         curl_easy_cleanup(ac);
@@ -1885,7 +1886,7 @@ static void handle_request(int fd) {
         curl_easy_setopt(lc, CURLOPT_WRITEFUNCTION, curl_write_cb);
         curl_easy_setopt(lc, CURLOPT_WRITEDATA, &list_buf);
         curl_easy_setopt(lc, CURLOPT_TIMEOUT, 5L);
-        CURLcode list_rc = curl_easy_perform(lc);
+        CURLcode list_rc = curl_easy_perform(lc); (void)list_rc;
         long list_http = -1;
         curl_easy_getinfo(lc, CURLINFO_RESPONSE_CODE, &list_http);
         curl_easy_cleanup(lc);
