@@ -47,7 +47,18 @@ WORKDIR /opt/app
 # Source the SDK environment and build
 RUN . /opt/axis/acapsdk/environment-setup* && acap-build ./
 
-WORKDIR /opt/app
-
-# Source the SDK environment and build
-RUN . /opt/axis/acapsdk/environment-setup* && acap-build ./
+# Inject audio files into the .eap package.
+# schema 1.9.0 has no "files" manifest key, so acap-build won't bundle
+# the audio/ directory automatically.  The .eap is a gzipped tar archive,
+# so we unpack it, add audio/, and repack.  The device installs the archive
+# contents to /usr/local/packages/mlb_scores/, putting the .au files at
+# /usr/local/packages/mlb_scores/audio/ where the app expects them.
+RUN set -e && \
+    EAP=$(ls *.eap) && \
+    mkdir -p /tmp/eap_work && \
+    tar -xzf "$EAP" -C /tmp/eap_work && \
+    mkdir -p /tmp/eap_work/audio && \
+    cp audio/hit_a_run.au          /tmp/eap_work/audio/ && \
+    cp audio/inning_change_organ.au /tmp/eap_work/audio/ && \
+    tar -czf "$EAP" -C /tmp/eap_work . && \
+    rm -rf /tmp/eap_work
