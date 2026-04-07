@@ -1757,6 +1757,23 @@ static void handle_request(int fd) {
 
         cJSON *clips_out = cJSON_CreateArray();
         for (int ci = 0; ci < nb; ci++) {
+            /* Check file exists before attempting upload */
+            int file_ok = (access(BUNDLED[ci].file, R_OK) == 0);
+            app_log("upload_clips: file=%s exists=%s", BUNDLED[ci].file, file_ok ? "yes" : "no");
+
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "name",      BUNDLED[ci].name);
+            cJSON_AddStringToObject(r, "file_path", BUNDLED[ci].file);
+            cJSON_AddStringToObject(r, "file_exists", file_ok ? "yes" : "no");
+
+            if (!file_ok) {
+                cJSON_AddNumberToObject(r, "http_code", -1);
+                cJSON_AddNumberToObject(r, "curl_code", -1);
+                cJSON_AddStringToObject(r, "response",  "file not found on device");
+                cJSON_AddItemToArray(clips_out, r);
+                continue;
+            }
+
             CURL *uc = curl_easy_init();
             curl_mime     *mime = curl_mime_init(uc);
             curl_mimepart *part;
@@ -1785,15 +1802,14 @@ static void handle_request(int fd) {
             curl_easy_cleanup(uc);
             curl_mime_free(mime);
 
-            app_log("upload_clips: %s http=%ld rc=%d resp=%s",
-                    BUNDLED[ci].name, http_code, rc,
+            app_log("upload_clips: %s http=%ld rc=%d(%s) resp=%s",
+                    BUNDLED[ci].name, http_code, (int)rc, curl_easy_strerror(rc),
                     resp.data ? resp.data : "(none)");
 
-            cJSON *r = cJSON_CreateObject();
-            cJSON_AddStringToObject(r, "name",      BUNDLED[ci].name);
-            cJSON_AddNumberToObject(r, "http_code", (double)http_code);
-            cJSON_AddNumberToObject(r, "curl_code", (double)rc);
-            cJSON_AddStringToObject(r, "response",  resp.data ? resp.data : "(none)");
+            cJSON_AddNumberToObject(r, "http_code",  (double)http_code);
+            cJSON_AddNumberToObject(r, "curl_code",  (double)rc);
+            cJSON_AddStringToObject(r, "curl_error", curl_easy_strerror(rc));
+            cJSON_AddStringToObject(r, "response",   resp.data ? resp.data : "(none)");
             cJSON_AddItemToArray(clips_out, r);
             free(resp.data);
         }
@@ -1809,106 +1825,173 @@ static void handle_request(int fd) {
     }
 
     /* ── GET /volume_diag ── */
-    /* Shows the clip play URL format (volume baked in) and device audio params. */
+    /* Tests the actual volume pipeline: download .au → scale µ-law → POST transmit.cgi */
     if (strcmp(method, "GET") == 0 && ROUTE("/volume_diag")) {
         pthread_mutex_lock(&g_app.lock);
         int cur_vol    = g_app.audio_volume;
-        int ex_clip_id = (g_app.num_teams > 0) ? g_app.teams[0].notify_clip_id : 38;
+        int ex_clip_id = (g_app.num_teams > 0) ? g_app.teams[0].notify_clip_id : 1;
         char user[64], pass[64];
-        strncpy(user, g_app.device_user, sizeof(user)-1);
-        strncpy(pass, g_app.device_pass, sizeof(pass)-1);
+        strncpy(user, g_app.device_user, sizeof(user)-1); user[63] = '\0';
+        strncpy(pass, g_app.device_pass, sizeof(pass)-1); pass[63] = '\0';
         pthread_mutex_unlock(&g_app.lock);
-
-        /* Map slider to dB (same formula as play_clip_ex) */
-        int gain_db = -95 + (cur_vol * 95 / 100);
-
-        char example_url[MAX_URL];
-        snprintf(example_url, sizeof(example_url),
-            MEDIACLIP_API " — gain set to %d dB via audiodevicecontrol.cgi before play",
-            ex_clip_id, gain_db);
 
         char cred[128];
         snprintf(cred, sizeof(cred), "%s:%s", user, pass);
 
-        /* Test: actually call setDevicesSettings with the current gain */
-        char set_body[384];
-        snprintf(set_body, sizeof(set_body),
-            "{\"apiVersion\":\"1.0\",\"method\":\"setDevicesSettings\","
-            "\"params\":{\"devices\":[{\"id\":\"0\",\"outputs\":[{\"id\":\"0\","
-            "\"connectionType\":{\"id\":\"internal\","
-            "\"signalingType\":{\"id\":\"unbalanced\",\"gain\":%d}}}]}]}}",
-            gain_db);
-        CURL *sc = curl_easy_init();
-        CurlBuf set_buf = {NULL, 0};
-        struct curl_slist *s_hdrs = curl_slist_append(NULL, "Content-Type: application/json");
-        curl_easy_setopt(sc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
-        curl_easy_setopt(sc, CURLOPT_USERPWD,       cred);
-        curl_easy_setopt(sc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
-        curl_easy_setopt(sc, CURLOPT_HTTPHEADER,    s_hdrs);
-        curl_easy_setopt(sc, CURLOPT_POSTFIELDS,    set_body);
-        curl_easy_setopt(sc, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(sc, CURLOPT_WRITEDATA,     &set_buf);
-        curl_easy_setopt(sc, CURLOPT_TIMEOUT,       5L);
-        CURLcode set_rc = curl_easy_perform(sc);
-        long set_http = -1;
-        curl_easy_getinfo(sc, CURLINFO_RESPONSE_CODE, &set_http);
-        curl_easy_cleanup(sc);
-        curl_slist_free_all(s_hdrs);
+        cJSON *diag = cJSON_CreateObject();
+        cJSON_AddNumberToObject(diag, "volume_pct",  (double)cur_vol);
+        cJSON_AddStringToObject(diag, "pipeline",    "download .au -> decode ulaw -> scale -> re-encode -> POST transmit.cgi");
 
-        /* Query audiodevicecontrol.cgi for device gain capabilities */
-        const char *adc_body = "{\"apiVersion\":\"1.0\",\"method\":\"getDevicesCapabilities\"}";
-        CURL *ac = curl_easy_init();
-        CurlBuf adc_buf = {NULL, 0};
-        struct curl_slist *adc_hdrs = curl_slist_append(NULL, "Content-Type: application/json");
-        curl_easy_setopt(ac, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audiodevicecontrol.cgi");
-        curl_easy_setopt(ac, CURLOPT_USERPWD,       cred);
-        curl_easy_setopt(ac, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
-        curl_easy_setopt(ac, CURLOPT_HTTPHEADER,    adc_hdrs);
-        curl_easy_setopt(ac, CURLOPT_POSTFIELDS,    adc_body);
-        curl_easy_setopt(ac, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(ac, CURLOPT_WRITEDATA,     &adc_buf);
-        curl_easy_setopt(ac, CURLOPT_TIMEOUT,       5L);
-        CURLcode adc_rc = curl_easy_perform(ac); (void)adc_rc;
-        long adc_http = -1;
-        curl_easy_getinfo(ac, CURLINFO_RESPONSE_CODE, &adc_http);
-        curl_easy_cleanup(ac);
-        curl_slist_free_all(adc_hdrs);
+        /* ── Step 1: Download clip as .au ── */
+        char dl_url[MAX_URL];
+        snprintf(dl_url, sizeof(dl_url),
+            "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=download&clip=%d", ex_clip_id);
 
-        /* List root.Audio params for reference */
+        CURL *dc = curl_easy_init();
+        CurlBuf au_buf = {NULL, 0};
+        curl_easy_setopt(dc, CURLOPT_URL,           dl_url);
+        curl_easy_setopt(dc, CURLOPT_USERPWD,       cred);
+        curl_easy_setopt(dc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+        curl_easy_setopt(dc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(dc, CURLOPT_WRITEDATA,     &au_buf);
+        curl_easy_setopt(dc, CURLOPT_TIMEOUT,       10L);
+        CURLcode dl_rc = curl_easy_perform(dc);
+        long dl_http = -1;
+        curl_easy_getinfo(dc, CURLINFO_RESPONSE_CODE, &dl_http);
+        curl_easy_cleanup(dc);
+
+        cJSON *s1 = cJSON_CreateObject();
+        cJSON_AddNumberToObject(s1, "clip_id",       (double)ex_clip_id);
+        cJSON_AddStringToObject(s1, "url",           dl_url);
+        cJSON_AddNumberToObject(s1, "http_code",     (double)dl_http);
+        cJSON_AddNumberToObject(s1, "curl_code",     (double)dl_rc);
+        cJSON_AddStringToObject(s1, "curl_error",    curl_easy_strerror(dl_rc));
+        cJSON_AddNumberToObject(s1, "bytes_received",(double)au_buf.len);
+
+        /* Parse .au header and report fields */
+        int au_ok = 0;
+        uint32_t au_enc = 0, au_rate = 0, au_ch = 0;
+        int au_off = -1;
+        if (dl_rc == CURLE_OK && dl_http == 200 && au_buf.data && au_buf.len >= 24) {
+            au_off = au_parse_header((uint8_t *)au_buf.data, au_buf.len,
+                                     &au_enc, &au_rate, &au_ch);
+            au_ok  = (au_off > 0 && au_enc == 1);
+        }
+        /* First 4 bytes as hex so we can see the magic */
+        char magic_hex[16] = "(none)";
+        if (au_buf.len >= 4)
+            snprintf(magic_hex, sizeof(magic_hex), "%02X%02X%02X%02X",
+                (uint8_t)au_buf.data[0], (uint8_t)au_buf.data[1],
+                (uint8_t)au_buf.data[2], (uint8_t)au_buf.data[3]);
+        int magic_ok = (au_buf.len >= 4 &&
+                        (uint8_t)au_buf.data[0] == 0x2E &&
+                        (uint8_t)au_buf.data[1] == 0x73 &&
+                        (uint8_t)au_buf.data[2] == 0x6E &&
+                        (uint8_t)au_buf.data[3] == 0x64);
+        cJSON_AddStringToObject(s1, "magic_hex",      magic_hex);
+        cJSON_AddStringToObject(s1, "magic_ok",       magic_ok ? "yes (.snd)" : "no — not a .au file");
+        cJSON_AddNumberToObject(s1, "au_encoding",    (double)au_enc);
+        cJSON_AddStringToObject(s1, "au_encoding_name",
+            au_enc == 1 ? "ulaw(OK)" : au_enc == 2 ? "pcm8" :
+            au_enc == 3 ? "pcm16"    : au_enc == 27 ? "alaw" : "unknown");
+        cJSON_AddNumberToObject(s1, "au_sample_rate", (double)au_rate);
+        cJSON_AddNumberToObject(s1, "au_channels",    (double)au_ch);
+        cJSON_AddNumberToObject(s1, "au_data_offset", (double)au_off);
+        cJSON_AddStringToObject(s1, "au_parse_ok",    au_ok ? "yes" : "no");
+        /* If parse failed, show first 128 bytes as text so we can read any error message */
+        if (!au_ok && au_buf.data && au_buf.len > 0) {
+            size_t show = au_buf.len < 128 ? au_buf.len : 128;
+            char preview[256] = {0};
+            for (size_t pi = 0; pi < show; pi++) {
+                uint8_t b = (uint8_t)au_buf.data[pi];
+                if (b >= 0x20 && b < 0x7F) preview[pi] = (char)b;
+                else preview[pi] = '.';
+            }
+            cJSON_AddStringToObject(s1, "response_preview", preview);
+        }
+        cJSON_AddItemToObject(diag, "step1_download", s1);
+
+        /* ── Step 2: Stream to transmit.cgi ── */
+        /* Use real scaled clip if download succeeded; else 0.5s of µ-law silence as smoke test */
+        uint8_t *tx_data   = NULL;
+        size_t   tx_len    = 0;
+        int      tx_synth  = 0;
+
+        if (au_ok) {
+            size_t n = au_buf.len - (size_t)au_off;
+            tx_data = malloc(n);
+            if (tx_data) {
+                float gain = (float)cur_vol / 100.0f;
+                const uint8_t *src = (uint8_t *)au_buf.data + au_off;
+                for (size_t i = 0; i < n; i++) {
+                    int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
+                    if (s >  32767) s =  32767;
+                    if (s < -32768) s = -32768;
+                    tx_data[i] = ulaw_encode((int16_t)s);
+                }
+                tx_len = n;
+            }
+        }
+        if (!tx_data) {
+            /* 0.5 s of µ-law silence (0xFF = encoded zero) — tests transmit.cgi independently */
+            tx_len  = 4000;
+            tx_data = malloc(tx_len);
+            if (tx_data) { memset(tx_data, 0xFF, tx_len); tx_synth = 1; }
+        }
+
+        cJSON *s2 = cJSON_CreateObject();
+        cJSON_AddStringToObject(s2, "url",         "http://127.0.0.1/axis-cgi/audio/transmit.cgi");
+        cJSON_AddStringToObject(s2, "data_source", tx_synth ? "synthetic_silence_smoke_test" : "scaled_real_clip");
+        cJSON_AddNumberToObject(s2, "bytes_sent",  (double)tx_len);
+        if (tx_data) {
+            struct curl_slist *tx_hdrs = curl_slist_append(NULL, "Content-Type: audio/basic");
+            CURL *tc = curl_easy_init();
+            CurlBuf tx_resp = {NULL, 0};
+            curl_easy_setopt(tc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/audio/transmit.cgi");
+            curl_easy_setopt(tc, CURLOPT_USERPWD,       cred);
+            curl_easy_setopt(tc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
+            curl_easy_setopt(tc, CURLOPT_HTTPHEADER,    tx_hdrs);
+            curl_easy_setopt(tc, CURLOPT_POSTFIELDS,    (char *)tx_data);
+            curl_easy_setopt(tc, CURLOPT_POSTFIELDSIZE, (long)tx_len);
+            curl_easy_setopt(tc, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            curl_easy_setopt(tc, CURLOPT_WRITEDATA,     &tx_resp);
+            curl_easy_setopt(tc, CURLOPT_TIMEOUT,       30L);
+            CURLcode tx_rc = curl_easy_perform(tc);
+            long tx_http = -1;
+            curl_easy_getinfo(tc, CURLINFO_RESPONSE_CODE, &tx_http);
+            curl_easy_cleanup(tc);
+            curl_slist_free_all(tx_hdrs);
+            free(tx_data);
+
+            cJSON_AddNumberToObject(s2, "http_code",  (double)tx_http);
+            cJSON_AddNumberToObject(s2, "curl_code",  (double)tx_rc);
+            cJSON_AddStringToObject(s2, "curl_error", curl_easy_strerror(tx_rc));
+            cJSON_AddStringToObject(s2, "response",   tx_resp.data ? tx_resp.data : "(empty)");
+            cJSON_AddStringToObject(s2, "success",
+                (tx_rc == CURLE_OK && tx_http >= 200 && tx_http < 300) ? "yes" : "no");
+            free(tx_resp.data);
+        } else {
+            cJSON_AddStringToObject(s2, "error", "malloc failed — cannot test transmit");
+        }
+        cJSON_AddItemToObject(diag, "step2_transmit", s2);
+        free(au_buf.data);
+
+        /* ── Step 3: audio params (reference) ── */
         char list_url[MAX_URL];
         snprintf(list_url, sizeof(list_url),
             "http://127.0.0.1/axis-cgi/param.cgi?action=list&group=root.Audio");
         CURL *lc = curl_easy_init();
         CurlBuf list_buf = {NULL, 0};
-        curl_easy_setopt(lc, CURLOPT_URL, list_url);
-        curl_easy_setopt(lc, CURLOPT_USERPWD, cred);
-        curl_easy_setopt(lc, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+        curl_easy_setopt(lc, CURLOPT_URL,           list_url);
+        curl_easy_setopt(lc, CURLOPT_USERPWD,       cred);
+        curl_easy_setopt(lc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
         curl_easy_setopt(lc, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(lc, CURLOPT_WRITEDATA, &list_buf);
-        curl_easy_setopt(lc, CURLOPT_TIMEOUT, 5L);
-        CURLcode list_rc = curl_easy_perform(lc); (void)list_rc;
-        long list_http = -1;
-        curl_easy_getinfo(lc, CURLINFO_RESPONSE_CODE, &list_http);
+        curl_easy_setopt(lc, CURLOPT_WRITEDATA,     &list_buf);
+        curl_easy_setopt(lc, CURLOPT_TIMEOUT,       5L);
+        CURLcode lc_rc = curl_easy_perform(lc); (void)lc_rc;
         curl_easy_cleanup(lc);
-
-        cJSON *diag = cJSON_CreateObject();
-        cJSON_AddNumberToObject(diag, "audio_volume_setting",  cur_vol);
-        cJSON_AddNumberToObject(diag, "gain_db_applied",       gain_db);
-        cJSON_AddStringToObject(diag, "note",
-            "gain set before each clip via audiodevicecontrol.cgi; restored to 0 dB after ~20s");
-        cJSON_AddNumberToObject(diag, "set_gain_http_code",    (double)set_http);
-        cJSON_AddNumberToObject(diag, "set_gain_curl_code",    (double)set_rc);
-        cJSON_AddStringToObject(diag, "set_gain_response",
-            set_buf.data ? set_buf.data : "(no response)");
-        cJSON_AddNumberToObject(diag, "capabilities_http",  (double)adc_http);
-        cJSON_AddStringToObject(diag, "capabilities",
-            adc_buf.data ? adc_buf.data : "(no response)");
-        cJSON_AddNumberToObject(diag, "list_http_code",  (double)list_http);
         cJSON_AddStringToObject(diag, "audio_params",
             list_buf.data ? list_buf.data : "(no response)");
-
-        free(set_buf.data);
-        free(adc_buf.data);
         free(list_buf.data);
 
         char *diag_out = cJSON_PrintUnformatted(diag);
