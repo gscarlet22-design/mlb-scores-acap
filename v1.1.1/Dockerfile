@@ -19,7 +19,8 @@ ARG SDK=acap-native-sdk
 FROM ${REPO}/${SDK}:${VERSION}-${ARCH}-ubuntu${UBUNTU_VERSION}
 
 # Download cJSON source (not bundled in Axis SDK sysroot)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates && \
+# Install ffmpeg for audio conversion (MP3 → µ-law .au)
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates ffmpeg && \
     curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.h -o /tmp/cJSON.h && \
     curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c -o /tmp/cJSON.c
 
@@ -29,6 +30,22 @@ COPY ./app /opt/app/
 # Place cJSON alongside the app source
 RUN cp /tmp/cJSON.h /opt/app/cJSON.h && \
     cp /tmp/cJSON.c /opt/app/cJSON.c
+
+# Convert bundled MP3 clips to 8 kHz mono µ-law .au
+# transmit.cgi requires audio/basic (G.711 µ-law 8 kHz mono),
+# and mediaclip?action=download returns files in their uploaded format,
+# so uploading as .au means downloading as .au — matching our volume pipeline.
+RUN ffmpeg -y -i /opt/app/audio/hit_a_run.mp3 \
+        -ar 8000 -ac 1 -acodec pcm_mulaw -f au \
+        /opt/app/audio/hit_a_run.au && \
+    ffmpeg -y -i /opt/app/audio/inning_change_organ.mp3 \
+        -ar 8000 -ac 1 -acodec pcm_mulaw -f au \
+        /opt/app/audio/inning_change_organ.au
+
+WORKDIR /opt/app
+
+# Source the SDK environment and build
+RUN . /opt/axis/acapsdk/environment-setup* && acap-build ./
 
 WORKDIR /opt/app
 
