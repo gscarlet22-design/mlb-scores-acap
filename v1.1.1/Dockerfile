@@ -18,29 +18,23 @@ ARG SDK=acap-native-sdk
 
 FROM ${REPO}/${SDK}:${VERSION}-${ARCH}-ubuntu${UBUNTU_VERSION}
 
-# Download cJSON source (not bundled in Axis SDK sysroot)
-# Install ffmpeg for audio conversion (MP3 → µ-law .au)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates ffmpeg && \
-    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.h -o /tmp/cJSON.h && \
-    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c -o /tmp/cJSON.c
+# Download cJSON and minimp3 (neither is bundled in the Axis SDK sysroot).
+# minimp3 is a single-header pure-C MP3 decoder; no new LDLIBS required.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.h \
+         -o /tmp/cJSON.h && \
+    curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c \
+         -o /tmp/cJSON.c && \
+    curl -sL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h \
+         -o /tmp/minimp3.h
 
 # Copy application source into the SDK build directory
 COPY ./app /opt/app/
 
-# Place cJSON alongside the app source
-RUN cp /tmp/cJSON.h /opt/app/cJSON.h && \
-    cp /tmp/cJSON.c /opt/app/cJSON.c
-
-# Convert bundled MP3 clips to 8 kHz mono µ-law .au
-# transmit.cgi requires audio/basic (G.711 µ-law 8 kHz mono),
-# and mediaclip?action=download returns files in their uploaded format,
-# so uploading as .au means downloading as .au — matching our volume pipeline.
-RUN ffmpeg -y -i /opt/app/audio/hit_a_run.mp3 \
-        -ar 8000 -ac 1 -acodec pcm_mulaw -f au \
-        /opt/app/audio/hit_a_run.au && \
-    ffmpeg -y -i /opt/app/audio/inning_change_organ.mp3 \
-        -ar 8000 -ac 1 -acodec pcm_mulaw -f au \
-        /opt/app/audio/inning_change_organ.au
+# Place cJSON and minimp3 alongside the app source
+RUN cp /tmp/cJSON.h   /opt/app/cJSON.h   && \
+    cp /tmp/cJSON.c   /opt/app/cJSON.c   && \
+    cp /tmp/minimp3.h /opt/app/minimp3.h
 
 WORKDIR /opt/app
 
@@ -58,7 +52,7 @@ RUN set -e && \
     mkdir -p /tmp/eap_work && \
     tar -xzf "$EAP" -C /tmp/eap_work && \
     mkdir -p /tmp/eap_work/audio && \
-    cp audio/hit_a_run.au          /tmp/eap_work/audio/ && \
-    cp audio/inning_change_organ.au /tmp/eap_work/audio/ && \
+    cp audio/hit_a_run.mp3           /tmp/eap_work/audio/ && \
+    cp audio/inning_change_organ.mp3 /tmp/eap_work/audio/ && \
     tar -czf "$EAP" -C /tmp/eap_work . && \
     rm -rf /tmp/eap_work
