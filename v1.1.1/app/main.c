@@ -32,6 +32,11 @@
 #include <curl/curl.h>
 #include "cJSON.h"
 #include <axsdk/axparameter.h>
+
+/* minimp3: single-header MP3 decoder — header-only, no new link deps */
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "minimp3.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -425,8 +430,48 @@ static int au_parse_header(const uint8_t *d, size_t len,
     return (offset < len) ? (int)offset : -1;
 }
 
-/* ── Download a stored clip as .au ──────────────────────────────── */
-static int download_au_clip(int clip_id, uint8_t **out, size_t *out_len) {
+/* Returns 1 if the buffer starts with an MP3 sync word or ID3v2 tag. */
+static int is_mp3(const uint8_t *d, size_t len) {
+    if (len < 3) return 0;
+    if (d[0] == 0x49 && d[1] == 0x44 && d[2] == 0x33) return 1; /* ID3v2 */
+    if (d[0] == 0xFF && len >= 2) {
+        uint8_t b = d[1];
+        /* MPEG sync (top 5 bits set) + layer III (bits 1-2 == 01) */
+        if ((b & 0xE0) == 0xE0 && (b & 0x06) == 0x02) return 1;
+    }
+    return 0;
+}
+
+/* Resample interleaved int16 PCM from src_rate → dst_rate with stereo→mono
+   downmix. Returns a malloc'd mono buffer (*dst_frames_out samples). */
+static int16_t *resample_to_mono(const int16_t *src, int channels,
+                                  int src_frames, int src_rate, int dst_rate,
+                                  int *dst_frames_out) {
+    *dst_frames_out = (int)((int64_t)src_frames * dst_rate / src_rate);
+    if (*dst_frames_out <= 0) return NULL;
+    int16_t *out = malloc((size_t)(*dst_frames_out) * sizeof(int16_t));
+    if (!out) return NULL;
+    double ratio = (double)src_frames / (double)(*dst_frames_out);
+    for (int i = 0; i < *dst_frames_out; i++) {
+        double pos  = i * ratio;
+        int    lo   = (int)pos;
+        int    hi   = lo + 1 < src_frames ? lo + 1 : lo;
+        double frac = pos - lo;
+        double s_lo = 0.0, s_hi = 0.0;
+        for (int ch = 0; ch < channels; ch++) {
+            s_lo += src[lo * channels + ch];
+            s_hi += src[hi * channels + ch];
+        }
+        double v = (s_lo + frac * (s_hi - s_lo)) / channels;
+        if (v >  32767.0) v =  32767.0;
+        if (v < -32768.0) v = -32768.0;
+        out[i] = (int16_t)v;
+    }
+    return out;
+}
+
+/* ── Download a stored clip (any format) ────────────────────────── */
+static int download_clip(int clip_id, uint8_t **out, size_t *out_len) {
     char url[MAX_URL], cred[128];
     snprintf(url,  sizeof(url),  "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=download&clip=%d", clip_id);
     snprintf(cred, sizeof(cred), "%s:%s", g_app.device_user, g_app.device_pass);
@@ -445,8 +490,8 @@ static int download_au_clip(int clip_id, uint8_t **out, size_t *out_len) {
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(c);
 
-    if (rc != CURLE_OK || http_code != 200 || !buf.data || buf.len < 24) {
-        app_log("download_au_clip id=%d failed http=%ld rc=%d len=%zu",
+    if (rc != CURLE_OK || http_code != 200 || !buf.data || buf.len < 4) {
+        app_log("download_clip id=%d failed http=%ld rc=%d len=%zu",
                 clip_id, http_code, (int)rc, buf.len);
         free(buf.data);
         return 0;
@@ -457,35 +502,70 @@ static int download_au_clip(int clip_id, uint8_t **out, size_t *out_len) {
 }
 
 /* ── Download, volume-scale, and stream a clip via transmit.cgi ──── */
-/* Returns 1 on success, 0 on failure (caller falls back to mediaclip play). */
+/* Handles MP3 (via minimp3) and µ-law .au. Returns 1 on success, 0 on
+   failure (caller falls back to unscaled mediaclip play). */
 static int stream_scaled_clip(int clip_id, int volume_pct) {
-    uint8_t *au = NULL;
-    size_t   au_len = 0;
-    if (!download_au_clip(clip_id, &au, &au_len)) return 0;
+    uint8_t *raw = NULL;
+    size_t   raw_len = 0;
+    if (!download_clip(clip_id, &raw, &raw_len)) return 0;
 
-    uint32_t encoding = 0, sample_rate = 8000, channels = 1;
-    int data_off = au_parse_header(au, au_len, &encoding, &sample_rate, &channels);
-    if (data_off < 0 || encoding != 1) {
-        app_log("stream_scaled_clip: unsupported .au encoding=%u offset=%d", encoding, data_off);
-        free(au);
-        return 0;
+    uint8_t *scaled = NULL;
+    size_t   n      = 0;
+    float    gain   = (float)volume_pct / 100.0f;
+
+    if (is_mp3(raw, raw_len)) {
+        /* ── MP3 path: decode → resample → scale → µ-law ── */
+        mp3dec_t          dec;
+        mp3dec_file_info_t info;
+        mp3dec_init(&dec);
+        int err = mp3dec_load_buf(&dec, raw, raw_len, &info, NULL, NULL);
+        free(raw);
+        if (err || !info.buffer || info.samples == 0) {
+            app_log("stream_scaled_clip: mp3 decode failed err=%d", err);
+            free(info.buffer);
+            return 0;
+        }
+
+        int src_frames  = (int)(info.samples / (size_t)info.channels);
+        int dst_frames  = 0;
+        int16_t *mono8k = resample_to_mono(info.buffer, info.channels,
+                                           src_frames, info.hz, 8000,
+                                           &dst_frames);
+        free(info.buffer);
+        if (!mono8k || dst_frames == 0) { free(mono8k); return 0; }
+
+        n      = (size_t)dst_frames;
+        scaled = malloc(n);
+        if (!scaled) { free(mono8k); return 0; }
+        for (int i = 0; i < dst_frames; i++) {
+            int32_t s = (int32_t)((float)mono8k[i] * gain);
+            if (s >  32767) s =  32767;
+            if (s < -32768) s = -32768;
+            scaled[i] = ulaw_encode((int16_t)s);
+        }
+        free(mono8k);
+
+    } else {
+        /* ── .au µ-law path ── */
+        uint32_t encoding = 0, sample_rate = 8000, channels = 1;
+        int data_off = au_parse_header(raw, raw_len, &encoding, &sample_rate, &channels);
+        if (data_off < 0 || encoding != 1) {
+            app_log("stream_scaled_clip: unsupported format (not mp3 or ulaw .au)");
+            free(raw);
+            return 0;
+        }
+        const uint8_t *src = raw + data_off;
+        n      = raw_len - (size_t)data_off;
+        scaled = malloc(n);
+        if (!scaled) { free(raw); return 0; }
+        for (size_t i = 0; i < n; i++) {
+            int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
+            if (s >  32767) s =  32767;
+            if (s < -32768) s = -32768;
+            scaled[i] = ulaw_encode((int16_t)s);
+        }
+        free(raw);
     }
-
-    const uint8_t *src = au + data_off;
-    size_t n = au_len - (size_t)data_off;
-
-    /* Decode µ-law → scale → re-encode */
-    uint8_t *scaled = malloc(n);
-    if (!scaled) { free(au); return 0; }
-
-    float gain = (float)volume_pct / 100.0f;
-    for (size_t i = 0; i < n; i++) {
-        int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
-        if (s >  32767) s =  32767;
-        if (s < -32768) s = -32768;
-        scaled[i] = ulaw_encode((int16_t)s);
-    }
-    free(au);
 
     /* Stream scaled µ-law to transmit.cgi as audio/basic */
     char cred[128];
@@ -1741,8 +1821,8 @@ static void handle_request(int fd) {
     if (strcmp(method, "POST") == 0 && ROUTE("/upload_clips")) {
         #define INSTALL_DIR "/usr/local/packages/" APP_NAME "/"
         static const struct { const char *file; const char *name; } BUNDLED[] = {
-            { INSTALL_DIR "audio/hit_a_run.au",           "Hit a Run!"          },
-            { INSTALL_DIR "audio/inning_change_organ.au", "Inning Change Organ" },
+            { INSTALL_DIR "audio/hit_a_run.mp3",           "Hit a Run!"          },
+            { INSTALL_DIR "audio/inning_change_organ.mp3", "Inning Change Organ" },
         };
         int nb = (int)(sizeof(BUNDLED) / sizeof(BUNDLED[0]));
 
@@ -1781,7 +1861,8 @@ static void handle_request(int fd) {
             part = curl_mime_addpart(mime);
             curl_mime_name(part, "clip");
             curl_mime_filedata(part, BUNDLED[ci].file);
-            curl_mime_type(part, "audio/basic");  /* µ-law .au — device returns same format on download */
+            curl_mime_filename(part, BUNDLED[ci].name); /* sets Content-Disposition filename = display name */
+            curl_mime_type(part, "audio/mpeg");
 
             part = curl_mime_addpart(mime);
             curl_mime_name(part, "name");
@@ -1840,9 +1921,9 @@ static void handle_request(int fd) {
 
         cJSON *diag = cJSON_CreateObject();
         cJSON_AddNumberToObject(diag, "volume_pct",  (double)cur_vol);
-        cJSON_AddStringToObject(diag, "pipeline",    "download .au -> decode ulaw -> scale -> re-encode -> POST transmit.cgi");
+        cJSON_AddStringToObject(diag, "pipeline",    "download clip (mp3 or .au) -> decode -> resample to 8kHz mono -> scale -> POST transmit.cgi");
 
-        /* ── Step 1: Download clip as .au ── */
+        /* ── Step 1: Download clip ── */
         char dl_url[MAX_URL];
         snprintf(dl_url, sizeof(dl_url),
             "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=download&clip=%d", ex_clip_id);
@@ -1868,68 +1949,93 @@ static void handle_request(int fd) {
         cJSON_AddStringToObject(s1, "curl_error",    curl_easy_strerror(dl_rc));
         cJSON_AddNumberToObject(s1, "bytes_received",(double)au_buf.len);
 
-        /* Parse .au header and report fields */
-        int au_ok = 0;
+        /* Detect format and report */
+        int      au_ok  = 0;
+        int      is_mp3_fmt = 0;
         uint32_t au_enc = 0, au_rate = 0, au_ch = 0;
-        int au_off = -1;
-        if (dl_rc == CURLE_OK && dl_http == 200 && au_buf.data && au_buf.len >= 24) {
-            au_off = au_parse_header((uint8_t *)au_buf.data, au_buf.len,
-                                     &au_enc, &au_rate, &au_ch);
-            au_ok  = (au_off > 0 && au_enc == 1);
+        int      au_off = -1;
+        if (dl_rc == CURLE_OK && dl_http == 200 && au_buf.data && au_buf.len >= 4) {
+            is_mp3_fmt = is_mp3((uint8_t *)au_buf.data, au_buf.len);
+            if (!is_mp3_fmt && au_buf.len >= 24) {
+                au_off = au_parse_header((uint8_t *)au_buf.data, au_buf.len,
+                                         &au_enc, &au_rate, &au_ch);
+            }
+            au_ok = is_mp3_fmt || (au_off > 0 && au_enc == 1);
         }
-        /* First 4 bytes as hex so we can see the magic */
         char magic_hex[16] = "(none)";
         if (au_buf.len >= 4)
             snprintf(magic_hex, sizeof(magic_hex), "%02X%02X%02X%02X",
                 (uint8_t)au_buf.data[0], (uint8_t)au_buf.data[1],
                 (uint8_t)au_buf.data[2], (uint8_t)au_buf.data[3]);
-        int magic_ok = (au_buf.len >= 4 &&
-                        (uint8_t)au_buf.data[0] == 0x2E &&
-                        (uint8_t)au_buf.data[1] == 0x73 &&
-                        (uint8_t)au_buf.data[2] == 0x6E &&
-                        (uint8_t)au_buf.data[3] == 0x64);
-        cJSON_AddStringToObject(s1, "magic_hex",      magic_hex);
-        cJSON_AddStringToObject(s1, "magic_ok",       magic_ok ? "yes (.snd)" : "no — not a .au file");
-        cJSON_AddNumberToObject(s1, "au_encoding",    (double)au_enc);
+        cJSON_AddStringToObject(s1, "magic_hex",       magic_hex);
+        cJSON_AddStringToObject(s1, "format_detected", is_mp3_fmt ? "mp3" :
+                                    (au_off > 0 && au_enc == 1) ? "au_ulaw" : "unknown");
+        cJSON_AddNumberToObject(s1, "au_encoding",     (double)au_enc);
         cJSON_AddStringToObject(s1, "au_encoding_name",
             au_enc == 1 ? "ulaw(OK)" : au_enc == 2 ? "pcm8" :
-            au_enc == 3 ? "pcm16"    : au_enc == 27 ? "alaw" : "unknown");
-        cJSON_AddNumberToObject(s1, "au_sample_rate", (double)au_rate);
-        cJSON_AddNumberToObject(s1, "au_channels",    (double)au_ch);
-        cJSON_AddNumberToObject(s1, "au_data_offset", (double)au_off);
-        cJSON_AddStringToObject(s1, "au_parse_ok",    au_ok ? "yes" : "no");
-        /* If parse failed, show first 128 bytes as text so we can read any error message */
+            au_enc == 3 ? "pcm16"    : au_enc == 27 ? "alaw" : "n/a");
+        cJSON_AddNumberToObject(s1, "au_sample_rate",  (double)au_rate);
+        cJSON_AddNumberToObject(s1, "au_channels",     (double)au_ch);
+        cJSON_AddNumberToObject(s1, "au_data_offset",  (double)au_off);
+        cJSON_AddStringToObject(s1, "decode_supported", au_ok ? "yes" : "no");
         if (!au_ok && au_buf.data && au_buf.len > 0) {
             size_t show = au_buf.len < 128 ? au_buf.len : 128;
             char preview[256] = {0};
             for (size_t pi = 0; pi < show; pi++) {
                 uint8_t b = (uint8_t)au_buf.data[pi];
-                if (b >= 0x20 && b < 0x7F) preview[pi] = (char)b;
-                else preview[pi] = '.';
+                preview[pi] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
             }
             cJSON_AddStringToObject(s1, "response_preview", preview);
         }
         cJSON_AddItemToObject(diag, "step1_download", s1);
 
         /* ── Step 2: Stream to transmit.cgi ── */
-        /* Use real scaled clip if download succeeded; else 0.5s of µ-law silence as smoke test */
-        uint8_t *tx_data   = NULL;
-        size_t   tx_len    = 0;
-        int      tx_synth  = 0;
+        uint8_t *tx_data  = NULL;
+        size_t   tx_len   = 0;
+        int      tx_synth = 0;
 
         if (au_ok) {
-            size_t n = au_buf.len - (size_t)au_off;
-            tx_data = malloc(n);
-            if (tx_data) {
-                float gain = (float)cur_vol / 100.0f;
-                const uint8_t *src = (uint8_t *)au_buf.data + au_off;
-                for (size_t i = 0; i < n; i++) {
-                    int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
-                    if (s >  32767) s =  32767;
-                    if (s < -32768) s = -32768;
-                    tx_data[i] = ulaw_encode((int16_t)s);
+            float gain = (float)cur_vol / 100.0f;
+            if (is_mp3_fmt) {
+                mp3dec_t           dec;
+                mp3dec_file_info_t info;
+                mp3dec_init(&dec);
+                int mp3e = mp3dec_load_buf(&dec, (uint8_t *)au_buf.data,
+                                           au_buf.len, &info, NULL, NULL);
+                if (!mp3e && info.buffer && info.samples > 0) {
+                    int src_frames = (int)(info.samples / (size_t)info.channels);
+                    int dst_frames = 0;
+                    int16_t *mono  = resample_to_mono(info.buffer, info.channels,
+                                                      src_frames, info.hz, 8000,
+                                                      &dst_frames);
+                    free(info.buffer);
+                    if (mono && dst_frames > 0) {
+                        tx_len  = (size_t)dst_frames;
+                        tx_data = malloc(tx_len);
+                        if (tx_data) {
+                            for (int i = 0; i < dst_frames; i++) {
+                                int32_t s = (int32_t)((float)mono[i] * gain);
+                                if (s >  32767) s =  32767;
+                                if (s < -32768) s = -32768;
+                                tx_data[i] = ulaw_encode((int16_t)s);
+                            }
+                        }
+                    }
+                    free(mono);
+                } else { free(info.buffer); }
+            } else {
+                size_t n = au_buf.len - (size_t)au_off;
+                tx_data = malloc(n);
+                if (tx_data) {
+                    const uint8_t *src = (uint8_t *)au_buf.data + au_off;
+                    for (size_t i = 0; i < n; i++) {
+                        int32_t s = (int32_t)((float)ulaw_decode(src[i]) * gain);
+                        if (s >  32767) s =  32767;
+                        if (s < -32768) s = -32768;
+                        tx_data[i] = ulaw_encode((int16_t)s);
+                    }
+                    tx_len = n;
                 }
-                tx_len = n;
             }
         }
         if (!tx_data) {
