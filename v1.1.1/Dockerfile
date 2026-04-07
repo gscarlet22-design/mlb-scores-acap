@@ -26,15 +26,18 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-cer
     curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c \
          -o /tmp/cJSON.c && \
     curl -sL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h \
-         -o /tmp/minimp3.h
+         -o /tmp/minimp3.h && \
+    curl -sL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3_ex.h \
+         -o /tmp/minimp3_ex.h
 
 # Copy application source into the SDK build directory
 COPY ./app /opt/app/
 
 # Place cJSON and minimp3 alongside the app source
-RUN cp /tmp/cJSON.h   /opt/app/cJSON.h   && \
-    cp /tmp/cJSON.c   /opt/app/cJSON.c   && \
-    cp /tmp/minimp3.h /opt/app/minimp3.h
+RUN cp /tmp/cJSON.h      /opt/app/cJSON.h      && \
+    cp /tmp/cJSON.c      /opt/app/cJSON.c      && \
+    cp /tmp/minimp3.h    /opt/app/minimp3.h    && \
+    cp /tmp/minimp3_ex.h /opt/app/minimp3_ex.h
 
 WORKDIR /opt/app
 
