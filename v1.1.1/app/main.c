@@ -15,13 +15,13 @@
  * API used:
  *   Schedule: https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=<id>&date=YYYY-MM-DD
  *   Live feed: https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live
- * Please Work
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -514,7 +514,14 @@ static int stream_scaled_clip(int clip_id, int volume_pct) {
 
     uint8_t *scaled = NULL;
     size_t   n      = 0;
-    float    gain   = (float)volume_pct / 100.0f;
+    /* Perceptual volume curve: gain = (vol/100)^1.7
+     * Maps slider percentage to perceived loudness:
+     *   1%  → gain 0.0005  (nearly silent)
+     *   50% → gain 0.31    (≈ −10 dB, perceptually half as loud as 100%)
+     *  100% → gain 1.0     (full volume)
+     */
+    float    _v     = (float)volume_pct / 100.0f;
+    float    gain   = (_v <= 0.0f) ? 0.0f : powf(_v, 1.7f);
 
     if (is_mp3(raw, raw_len)) {
         /* ── MP3 path: decode → resample → scale → µ-law ── */
@@ -1859,21 +1866,27 @@ static void handle_request(int fd) {
             }
 
             CURL *uc = curl_easy_init();
+
+            /* Build upload URL with the clip name as a query param.
+             * The Axis device reads the display name from ?name=..., not
+             * from the multipart Content-Disposition filename field. */
+            char upload_url[512];
+            char *enc_name = curl_easy_escape(uc, BUNDLED[ci].name, 0);
+            snprintf(upload_url, sizeof(upload_url),
+                     "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=upload&name=%s",
+                     enc_name ? enc_name : "");
+            curl_free(enc_name);
+
             curl_mime     *mime = curl_mime_init(uc);
             curl_mimepart *part;
 
             part = curl_mime_addpart(mime);
             curl_mime_name(part, "clip");
             curl_mime_filedata(part, BUNDLED[ci].file);
-            curl_mime_filename(part, BUNDLED[ci].name); /* sets Content-Disposition filename = display name */
             curl_mime_type(part, "audio/mpeg");
 
-            part = curl_mime_addpart(mime);
-            curl_mime_name(part, "name");
-            curl_mime_data(part, BUNDLED[ci].name, CURL_ZERO_TERMINATED);
-
             CurlBuf resp = {NULL, 0};
-            curl_easy_setopt(uc, CURLOPT_URL,           "http://127.0.0.1/axis-cgi/mediaclip.cgi?action=upload");
+            curl_easy_setopt(uc, CURLOPT_URL,           upload_url);
             curl_easy_setopt(uc, CURLOPT_USERPWD,       cred);
             curl_easy_setopt(uc, CURLOPT_HTTPAUTH,      CURLAUTH_DIGEST);
             curl_easy_setopt(uc, CURLOPT_MIMEPOST,      mime);
@@ -1999,7 +2012,8 @@ static void handle_request(int fd) {
         int      tx_synth = 0;
 
         if (au_ok) {
-            float gain = (float)cur_vol / 100.0f;
+            float _dv = (float)cur_vol / 100.0f;
+            float gain = (_dv <= 0.0f) ? 0.0f : powf(_dv, 1.7f);
             if (is_mp3_fmt) {
                 mp3dec_t           dec;
                 mp3dec_file_info_t info;
