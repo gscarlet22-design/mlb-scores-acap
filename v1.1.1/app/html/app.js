@@ -578,22 +578,29 @@
         btn.textContent = 'Running…';
         out.textContent = '';
         api('/volume_diag').then(function (r) { return r.json(); }).then(function (d) {
+            var s1 = d.step1_download  || {};
+            var s2 = d.step2_transmit  || {};
             var lines = [
-                'Volume setting: ' + d.audio_volume_setting + '% → Output gain: ' + d.gain_db_applied + ' dB',
-                d.note,
+                'Volume: ' + d.volume_pct + '%   Pipeline: ' + d.pipeline,
                 '',
-                '── Set Gain (tested live) ───────────',
-                'HTTP status: ' + d.set_gain_http_code + '  (CURL code: ' + d.set_gain_curl_code + ')',
-                d.set_gain_response,
+                '── Step 1: Download clip as .au ─────',
+                'Clip ID: ' + s1.clip_id + '   URL: ' + s1.url,
+                'HTTP: ' + s1.http_code + '   CURL: ' + s1.curl_code + ' (' + s1.curl_error + ')',
+                'Bytes received: ' + s1.bytes_received,
+                'Magic: ' + s1.magic_hex + '   Valid .snd: ' + s1.magic_ok,
+                'Encoding: ' + s1.au_encoding + ' (' + s1.au_encoding_name + ')   Rate: ' + s1.au_sample_rate + ' Hz   Ch: ' + s1.au_channels,
+                'Data offset: ' + s1.au_data_offset + '   Parse OK: ' + s1.au_parse_ok,
+                s1.response_preview ? ('Response preview: ' + s1.response_preview) : '',
                 '',
-                '── Device Capabilities ──────────────',
-                'HTTP status: ' + d.capabilities_http,
-                '(see full output in previous run)',
+                '── Step 2: POST to transmit.cgi ─────',
+                'Data source: ' + s2.data_source + '   Bytes: ' + s2.bytes_sent,
+                'HTTP: ' + s2.http_code + '   CURL: ' + s2.curl_code + ' (' + s2.curl_error + ')',
+                'Response: ' + s2.response,
+                'SUCCESS: ' + s2.success,
                 '',
                 '── Device Audio Parameters ──────────',
-                'HTTP status: ' + d.list_http_code,
                 d.audio_params,
-            ];
+            ].filter(function(l){ return l !== undefined; });
             out.textContent = lines.join('\n');
         }).catch(function (e) {
             out.textContent = 'Request failed: ' + e;
