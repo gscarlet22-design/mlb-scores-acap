@@ -1458,7 +1458,7 @@ static void poll_one_team(int idx) {
         if (cfg->audio_enabled) {
             if (score_changed) {
                 if (my_scored) play_clip(cfg->score_clip_id);
-                else           play_clip(cfg->notify_clip_id);
+                else           play_clip(cfg->score_clip_id);
             } else if (inning_changed) {
                 play_clip(cfg->notify_clip_id);
             }
