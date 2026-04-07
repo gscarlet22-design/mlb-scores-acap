@@ -15,6 +15,7 @@
  * API used:
  *   Schedule: https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=<id>&date=YYYY-MM-DD
  *   Live feed: https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live
+ * Please Work
  */
 
 #include <stdio.h>
