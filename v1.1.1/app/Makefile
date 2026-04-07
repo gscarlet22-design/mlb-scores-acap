@@ -7,7 +7,7 @@ GLIB_INC = $(SYSROOT)/usr/include/glib-2.0 \
            $(SYSROOT)/usr/lib/glib-2.0/include \
            $(SYSROOT)/usr/include
 
-LDLIBS  = -lcurl -laxparameter -lglib-2.0 -lpthread
+LDLIBS  = -lcurl -laxparameter -lglib-2.0 -lpthread -lm
 CFLAGS += -Wall -Wextra -O2 -std=c11 -I. \
           $(addprefix -I,$(GLIB_INC))
 
