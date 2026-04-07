@@ -1741,8 +1741,8 @@ static void handle_request(int fd) {
     if (strcmp(method, "POST") == 0 && ROUTE("/upload_clips")) {
         #define INSTALL_DIR "/usr/local/packages/" APP_NAME "/"
         static const struct { const char *file; const char *name; } BUNDLED[] = {
-            { INSTALL_DIR "audio/hit_a_run.mp3",           "Hit a Run!"          },
-            { INSTALL_DIR "audio/inning_change_organ.mp3", "Inning Change Organ" },
+            { INSTALL_DIR "audio/hit_a_run.au",           "Hit a Run!"          },
+            { INSTALL_DIR "audio/inning_change_organ.au", "Inning Change Organ" },
         };
         int nb = (int)(sizeof(BUNDLED) / sizeof(BUNDLED[0]));
 
@@ -1781,7 +1781,7 @@ static void handle_request(int fd) {
             part = curl_mime_addpart(mime);
             curl_mime_name(part, "clip");
             curl_mime_filedata(part, BUNDLED[ci].file);
-            curl_mime_type(part, "audio/mpeg");
+            curl_mime_type(part, "audio/basic");  /* µ-law .au — device returns same format on download */
 
             part = curl_mime_addpart(mime);
             curl_mime_name(part, "name");
