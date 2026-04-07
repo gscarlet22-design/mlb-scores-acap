@@ -8,6 +8,7 @@
 #   docker build --build-arg ARCH=aarch64 --tag mlb_scores:1.1.1 .
 #   docker cp $(docker create mlb_scores:1.1.1):/opt/app ./build
 #   # → ./build/mlb_scores_1_1_1_aarch64.eap
+# I hope this works! 
 # ──────────────────────────────────────────────────────────────────────────────
 
 ARG ARCH=aarch64
