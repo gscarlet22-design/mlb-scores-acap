@@ -7,7 +7,7 @@
             "vendor": "gscarlet22 design",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "1.1.14",
+            "version": "1.1.15",
             "user": {
                 "username": "sdk",
                 "group": "sdk"
@@ -16,6 +16,10 @@
         },
         "configuration": {
             "settingPage": "index.html",
+            "files": [
+                "audio/hit_a_run.au",
+                "audio/inning_change_organ.au"
+            ],
             "reverseProxy": [
                 {
                     "apiPath": "api",
