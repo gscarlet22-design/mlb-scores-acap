@@ -16,10 +16,6 @@
         },
         "configuration": {
             "settingPage": "index.html",
-            "files": [
-                "audio/hit_a_run.au",
-                "audio/inning_change_organ.au"
-            ],
             "reverseProxy": [
                 {
                     "apiPath": "api",
