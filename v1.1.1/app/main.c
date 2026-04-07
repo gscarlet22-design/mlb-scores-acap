@@ -33,10 +33,12 @@
 #include "cJSON.h"
 #include <axsdk/axparameter.h>
 
-/* minimp3: single-header MP3 decoder — header-only, no new link deps */
+/* minimp3: single-header MP3 decoder — header-only, no new link deps.
+   minimp3_ex.h provides mp3dec_file_info_t / mp3dec_load_buf and
+   pulls in minimp3.h internally. */
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
-#include "minimp3.h"
+#include "minimp3_ex.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -604,7 +606,8 @@ static int stream_scaled_clip(int clip_id, int volume_pct) {
    device output gain never touched). Falls back to mediaclip play on failure. */
 static long play_clip_ex(int clip_id, char *resp_out, size_t resp_sz) {
     int vol = g_app.audio_volume;
-    if (vol < 0) vol = 0; if (vol > 100) vol = 100;
+    if (vol < 0)   vol = 0;
+    if (vol > 100) vol = 100;
 
     if (stream_scaled_clip(clip_id, vol)) {
         if (resp_out) snprintf(resp_out, resp_sz,
